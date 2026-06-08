@@ -1,18 +1,16 @@
 """Prime Automation Hub — webhook server.
 
 Endpoints:
-  POST /webhook      — QBO change notifications (invoice created, etc.)
+  POST /webhook      — QBO change notifications (auto-processes Invoice Create)
   POST /webhook/tap  — Tap payment capture notifications
   GET  /health       — liveness + config status
-
-Start:  python -m scripts.start_webhook
 """
 from __future__ import annotations
 
 import json
 import os
 
-from fastapi import FastAPI, Header, HTTPException, Request, status
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, status
 
 from logging_config import get_logger
 from webhook.storage import count_all_events, get_recent_events, store_webhook_payload
@@ -23,13 +21,59 @@ _LOG = get_logger("webhook.server")
 app = FastAPI(title="Prime Automation Hub", version="1.0.0")
 
 
+# ── QBO invoice processor (background task) ───────────────────────────────────
+
+def _process_qbo_invoice(invoice_id: str) -> None:
+    """Run the full invoice → Tap link → WhatsApp workflow in the background.
+
+    Called when QBO fires an Invoice Create event. Runs after the webhook
+    has already returned 200 to Intuit, so processing time doesn't matter.
+    """
+    try:
+        from config import get_settings
+        from qbo.client import QuickBooksClient
+        from tap.client import tap_client_from_settings
+        from messaging.whatsapp import whatsapp_client_from_settings
+        from workflows.invoice_to_tap import process_invoice, LinkResult, SkipResult
+
+        settings  = get_settings()
+        qbo       = QuickBooksClient(settings=settings)
+        tap       = tap_client_from_settings(settings)
+        whatsapp  = whatsapp_client_from_settings(settings)
+
+        result = process_invoice(
+            invoice_id,
+            qbo_client=qbo,
+            tap_client=tap,
+            whatsapp_client=whatsapp,
+            settings=settings,
+        )
+
+        if isinstance(result, SkipResult):
+            _LOG.info("qbo_invoice_skipped",
+                      extra={"invoice_id": invoice_id, "reason": result.reason})
+        elif isinstance(result, LinkResult):
+            _LOG.info("qbo_invoice_processed",
+                      extra={
+                          "invoice_id": invoice_id,
+                          "tap_charge_id": result.tap_charge_id,
+                          "whatsapp_sent": result.whatsapp_sent,
+                          "status": result.status,
+                      })
+    except Exception as exc:
+        _LOG.error("qbo_invoice_process_error",
+                   extra={"invoice_id": invoice_id, "error": str(exc)})
+
+
 # ── QBO webhook ───────────────────────────────────────────────────────────────
 
 @app.post("/webhook", status_code=status.HTTP_200_OK)
 async def receive_qbo_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     intuit_signature: str | None = Header(default=None, alias="intuit-signature"),
 ) -> dict:
+    """Receive QBO change notification, verify, store, and process Invoice Creates."""
     payload_bytes: bytes = await request.body()
     verifier_token = os.getenv("QBO_WEBHOOK_VERIFIER_TOKEN", "").strip()
 
@@ -46,8 +90,28 @@ async def receive_qbo_webhook(
         raise HTTPException(status_code=400, detail=str(exc))
 
     events_stored = store_webhook_payload(payload, payload_bytes.decode("utf-8"))
-    _LOG.info("qbo_webhook_received", extra={"events_stored": events_stored})
-    return {"status": "ok", "events_stored": events_stored}
+
+    # ── auto-process Invoice Create events ────────────────────────────────────
+    invoice_ids_to_process: list[str] = []
+    for notification in payload.get("eventNotifications", []):
+        entities = notification.get("dataChangeEvent", {}).get("entities", [])
+        for entity in entities:
+            if entity.get("name") == "Invoice" and entity.get("operation") == "Create":
+                invoice_ids_to_process.append(entity["id"])
+
+    for invoice_id in invoice_ids_to_process:
+        _LOG.info("qbo_invoice_create_detected", extra={"invoice_id": invoice_id})
+        background_tasks.add_task(_process_qbo_invoice, invoice_id)
+
+    _LOG.info("qbo_webhook_received",
+              extra={"events_stored": events_stored,
+                     "invoices_queued": len(invoice_ids_to_process)})
+
+    return {
+        "status": "ok",
+        "events_stored": events_stored,
+        "invoices_queued": len(invoice_ids_to_process),
+    }
 
 
 # ── Tap webhook ───────────────────────────────────────────────────────────────
@@ -70,7 +134,6 @@ async def receive_tap_webhook(request: Request) -> dict:
     _LOG.info("tap_webhook_received",
               extra={"charge_id": charge_id, "status": charge_status})
 
-    # Ignore everything except captured payments
     if charge_status != "CAPTURED":
         return {"status": "ignored", "charge_status": charge_status}
 
