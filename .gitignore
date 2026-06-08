@@ -9,3 +9,5 @@ logs/
 
 # Local Netlify folder
 .netlify
+.tools/
+.venv/
