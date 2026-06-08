@@ -21,14 +21,14 @@ Add these to your `.env` (see `.env.example`):
 | Variable | Required | Description |
 |---|---|---|
 | `TAP_SECRET_KEY` | ✅ | From Tap Dashboard → Developers → API Credentials. Use `sk_live_…` for production. |
-| `TAP_REDIRECT_URL` | ✅ | Customer lands here after paying. Example: `https://hub.primekw.com/payment/callback` |
+| `TAP_REDIRECT_URL` | ✅ | Customer lands here after paying. Example: `https://prime-automation-hub.onrender.com/payment/success` |
 | `TAP_WEBHOOK_URL` | ✅ | Tap POSTs the result here. Example: `https://hub.primekw.com/webhook/tap` |
 | `DATABASE_PATH` | ⬜ | Path to the SQLite database file (default: `hub.db`) |
 
 > **Production note:** `TAP_REDIRECT_URL` and `TAP_WEBHOOK_URL` must be publicly accessible HTTPS URLs. For local testing, use ngrok:
 > ```bash
 > ngrok http 8080
-> # then set TAP_REDIRECT_URL=https://<ngrok-id>.ngrok.io/payment/callback
+> # then set TAP_REDIRECT_URL=https://<ngrok-id>.ngrok.io/payment/success
 > ```
 
 ---

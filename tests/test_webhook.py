@@ -154,3 +154,10 @@ def test_health_endpoint(web_client):
     body = resp.json()
     assert body["status"] == "healthy"
     assert body["qbo_token_configured"] is True
+
+
+def test_payment_success_page(web_client):
+    resp = web_client.get("/payment/success")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "Payment successful" in resp.text

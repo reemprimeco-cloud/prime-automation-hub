@@ -1,16 +1,19 @@
 """Prime Automation Hub — webhook server.
 
 Endpoints:
-  POST /webhook      — QBO change notifications (auto-processes Invoice Create)
-  POST /webhook/tap  — Tap payment capture notifications
-  GET  /health       — liveness + config status
+  POST /webhook         — QBO change notifications (auto-processes Invoice Create)
+  POST /webhook/tap     — Tap payment capture notifications
+  GET  /payment/success — customer lands here after Tap payment
+  GET  /health          — liveness + config status
 """
 from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, status
+from fastapi.responses import FileResponse
 
 from logging_config import get_logger
 from webhook.storage import count_all_events, get_recent_events, store_webhook_payload
@@ -19,6 +22,9 @@ from webhook.verify import verify_signature
 _LOG = get_logger("webhook.server")
 
 app = FastAPI(title="Prime Automation Hub", version="1.0.0")
+
+_PUBLIC_DIR = Path(__file__).resolve().parent.parent / "public"
+_PAYMENT_SUCCESS_PAGE = _PUBLIC_DIR / "payment" / "success.html"
 
 
 # ── QBO invoice processor (background task) ───────────────────────────────────
@@ -176,6 +182,16 @@ async def receive_tap_webhook(request: Request) -> dict:
     except Exception as exc:
         _LOG.error("tap_webhook_error", extra={"error": str(exc)})
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Tap payment redirect landing page ─────────────────────────────────────────
+
+@app.get("/payment/success")
+async def payment_success() -> FileResponse:
+    """Landing page after Tap redirects the customer back from checkout."""
+    if not _PAYMENT_SUCCESS_PAGE.is_file():
+        raise HTTPException(status_code=500, detail="Payment success page not found")
+    return FileResponse(_PAYMENT_SUCCESS_PAGE, media_type="text/html; charset=utf-8")
 
 
 # ── health ────────────────────────────────────────────────────────────────────

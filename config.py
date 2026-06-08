@@ -38,7 +38,7 @@ class Settings:
     webhook_verifier_token: str | None  # required only for the webhook receiver
     # ── Phase 3: Tap Payments + database (default values keep existing tests green) ──
     tap_secret_key: str | None = None
-    tap_redirect_url: str = "http://localhost:8000/payment/callback"
+    tap_redirect_url: str = "http://localhost:8080/payment/success"
     tap_webhook_url: str = "http://localhost:8000/webhook/tap"
     database_path: str = "hub.db"
     # ── Phase 4: Twilio WhatsApp ──────────────────────────────────────────────
@@ -81,7 +81,7 @@ def get_settings() -> Settings:
         realm_id=(os.getenv("QBO_REALM_ID", "").strip() or None),
         webhook_verifier_token=(os.getenv("QBO_WEBHOOK_VERIFIER_TOKEN", "").strip() or None),
         tap_secret_key=(os.getenv("TAP_SECRET_KEY", "").strip() or None),
-        tap_redirect_url=os.getenv("TAP_REDIRECT_URL", "http://localhost:8000/payment/callback").strip(),
+        tap_redirect_url=os.getenv("TAP_REDIRECT_URL", "http://localhost:8080/payment/success").strip(),
         tap_webhook_url=os.getenv("TAP_WEBHOOK_URL", "http://localhost:8000/webhook/tap").strip(),
         database_path=os.getenv("DATABASE_PATH", "hub.db").strip(),
         twilio_account_sid=(os.getenv("TWILIO_ACCOUNT_SID", "").strip() or None),
