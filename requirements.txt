@@ -1,0 +1,7 @@
+intuit-oauth>=1.2.6
+requests>=2.31.0
+python-dotenv>=1.0.0
+fastapi>=0.100.0
+uvicorn>=0.22.0
+httpx2>=0.28.0   # required by FastAPI TestClient (dev/test)
+twilio>=8.0.0

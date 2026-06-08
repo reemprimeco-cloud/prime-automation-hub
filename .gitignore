@@ -1,0 +1,11 @@
+.env
+tokens.json
+hub.db
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+logs/
+
+# Local Netlify folder
+.netlify

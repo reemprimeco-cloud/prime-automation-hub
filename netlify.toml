@@ -1,0 +1,18 @@
+[build]
+  publish = "public"
+  functions = "netlify/functions"
+
+[[redirects]]
+  from = "/quickbooks-webhook"
+  to = "/.netlify/functions/quickbooks-webhook"
+  status = 200
+
+[[redirects]]
+  from = "/oauth/callback"
+  to = "/.netlify/functions/oauth-callback"
+  status = 200
+
+[[redirects]]
+  from = "/tap-webhook"
+  to = "/.netlify/functions/tap-webhook"
+  status = 200
