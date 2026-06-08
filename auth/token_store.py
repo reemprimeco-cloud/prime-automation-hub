@@ -47,7 +47,8 @@ def bootstrap_from_env(path: str) -> bool:
     if os.path.exists(path):
         return False   # file already there — don't overwrite
     try:
-        decoded = base64.b64decode(env_val).decode("utf-8")
+        padded = env_val + "=" * (4 - len(env_val) % 4) if len(env_val) % 4 != 0 else env_val
+        decoded = base64.b64decode(padded).decode("utf-8")
         json.loads(decoded)  # validate it's parseable before writing
         tmp = f"{path}.tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
