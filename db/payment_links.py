@@ -5,6 +5,7 @@ Column order matches the migration SQL exactly.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -92,6 +93,117 @@ def create_link(
         extra={"invoice_id": invoice_id, "tap_charge_id": tap_charge_id},
     )
     return get_by_invoice_id(invoice_id)   # type: ignore[return-value]
+
+
+def register_existing_link(
+    *,
+    invoice_id: str,
+    customer_id: str,
+    tap_charge_id: str,
+    payment_url: str,
+    amount: float,
+    currency: str = "KWD",
+    invoice_number: str = "",
+    customer_name: str = "",
+    whatsapp_to_number: str = "",
+    qbo_note_updated: bool = True,
+    whatsapp_sent: bool = True,
+) -> bool:
+    """Register a payment link created outside this hub (idempotent).
+
+    Used to sync links generated locally so Render can auto-capture Tap webhooks.
+    Returns True if a new row was inserted, False if already registered.
+    """
+    init_table()
+    if get_by_invoice_id(invoice_id) or get_by_charge_id(tap_charge_id):
+        return False
+
+    now = _utcnow()
+    row_id = str(uuid.uuid4())
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO payment_links
+                (id, invoice_id, customer_id, invoice_number, customer_name,
+                 tap_charge_id, payment_url, amount, currency, status,
+                 qbo_note_updated, qbo_note_updated_at,
+                 whatsapp_sent, whatsapp_to_number, whatsapp_sent_at,
+                 created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,'LINK_GENERATED',?,?,?,?,?,?,?)
+            """,
+            (
+                row_id, invoice_id, customer_id, invoice_number, customer_name,
+                tap_charge_id, payment_url, amount, currency,
+                1 if qbo_note_updated else 0,
+                now if qbo_note_updated else None,
+                1 if whatsapp_sent else 0,
+                whatsapp_to_number or None,
+                now if whatsapp_sent and whatsapp_to_number else None,
+                now, now,
+            ),
+        )
+        conn.commit()
+    _LOG.info(
+        "payment_link_registered",
+        extra={"invoice_id": invoice_id, "tap_charge_id": tap_charge_id},
+    )
+    return True
+
+
+def bootstrap_links_from_file(path: str | None = None) -> int:
+    """Import missing payment links from a JSON file (runs on server startup).
+
+    Each entry needs: invoice_id, customer_id, tap_charge_id, payment_url, amount.
+    Optional: invoice_number, customer_name, currency, whatsapp_to_number.
+    """
+    import json
+    from pathlib import Path
+
+    if path is None:
+        path = os.getenv(
+            "PAYMENT_LINKS_BOOTSTRAP_PATH",
+            str(Path(__file__).resolve().parent.parent / "data" / "bootstrap_payment_links.json"),
+        )
+
+    bootstrap = Path(path)
+    if not bootstrap.is_file():
+        return 0
+
+    try:
+        records = json.loads(bootstrap.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        _LOG.warning("payment_links_bootstrap_read_failed", extra={"error": str(exc)})
+        return 0
+
+    if not isinstance(records, list):
+        return 0
+
+    imported = 0
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        try:
+            if register_existing_link(
+                invoice_id=str(rec["invoice_id"]),
+                customer_id=str(rec["customer_id"]),
+                tap_charge_id=str(rec["tap_charge_id"]),
+                payment_url=str(rec.get("payment_url") or ""),
+                amount=float(rec["amount"]),
+                currency=str(rec.get("currency") or "KWD"),
+                invoice_number=str(rec.get("invoice_number") or ""),
+                customer_name=str(rec.get("customer_name") or ""),
+                whatsapp_to_number=str(rec.get("whatsapp_to_number") or ""),
+            ):
+                imported += 1
+        except (KeyError, TypeError, ValueError) as exc:
+            _LOG.warning(
+                "payment_links_bootstrap_row_skipped",
+                extra={"error": str(exc), "invoice_id": rec.get("invoice_id")},
+            )
+
+    if imported:
+        _LOG.info("payment_links_bootstrap_complete", extra={"imported": imported})
+    return imported
 
 
 def mark_payment_captured(

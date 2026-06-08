@@ -15,7 +15,7 @@ from pathlib import Path
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import FileResponse
 
-from db.payment_links import init_table as init_payment_links_table
+from db.payment_links import bootstrap_links_from_file, init_table as init_payment_links_table
 from logging_config import get_logger
 from webhook.storage import count_all_events, get_recent_events, init_db, store_webhook_payload
 from webhook.verify import verify_signature
@@ -33,6 +33,7 @@ async def _startup() -> None:
     """Ensure SQLite tables exist before webhooks or background tasks run."""
     init_payment_links_table()
     init_db()
+    bootstrap_links_from_file()
     _LOG.info("database_ready")
 
 
