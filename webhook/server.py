@@ -15,8 +15,9 @@ from pathlib import Path
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import FileResponse
 
+from db.payment_links import init_table as init_payment_links_table
 from logging_config import get_logger
-from webhook.storage import count_all_events, get_recent_events, store_webhook_payload
+from webhook.storage import count_all_events, get_recent_events, init_db, store_webhook_payload
 from webhook.verify import verify_signature
 
 _LOG = get_logger("webhook.server")
@@ -25,6 +26,14 @@ app = FastAPI(title="Prime Automation Hub", version="1.0.0")
 
 _PUBLIC_DIR = Path(__file__).resolve().parent.parent / "public"
 _PAYMENT_SUCCESS_PAGE = _PUBLIC_DIR / "payment" / "success.html"
+
+
+@app.on_event("startup")
+async def _startup() -> None:
+    """Ensure SQLite tables exist before webhooks or background tasks run."""
+    init_payment_links_table()
+    init_db()
+    _LOG.info("database_ready")
 
 
 # ── QBO invoice processor (background task) ───────────────────────────────────

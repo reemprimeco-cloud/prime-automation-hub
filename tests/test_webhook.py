@@ -161,3 +161,23 @@ def test_payment_success_page(web_client):
     assert resp.status_code == 200
     assert "text/html" in resp.headers["content-type"]
     assert "Payment successful" in resp.text
+
+
+def test_tap_webhook_unknown_charge_after_startup(web_client, tmp_path, monkeypatch):
+    db_path = str(tmp_path / "hub.db")
+    monkeypatch.setenv("DATABASE_PATH", db_path)
+
+    from webhook.server import app
+    client = TestClient(app, raise_server_exceptions=True)
+
+    resp = client.post(
+        "/webhook/tap",
+        json={
+            "id": "chg_test_unknown",
+            "status": "CAPTURED",
+            "amount": 1,
+            "currency": "KWD",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "unknown_charge"

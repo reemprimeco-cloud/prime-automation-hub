@@ -61,6 +61,8 @@ def handle_payment_capture(
     """
     _LOG.info("capture_start", extra={"tap_charge_id": tap_charge_id})
 
+    db.init_table()
+
     # ── 1. Look up the payment link record ────────────────────────────────────
     record = db.get_by_charge_id(tap_charge_id)
     if record is None:
