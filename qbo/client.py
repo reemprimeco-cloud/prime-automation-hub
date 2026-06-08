@@ -17,7 +17,7 @@ import requests
 
 from config import Settings, get_settings
 from auth.oauth import refresh_tokens
-from auth.token_store import TokenData, load_tokens, save_tokens
+from auth.token_store import TokenData, bootstrap_from_env, load_tokens, save_tokens
 from logging_config import get_logger
 from qbo.models import Customer
 
@@ -35,6 +35,7 @@ class NotAuthorizedError(QBOError):
 class QuickBooksClient:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
+        bootstrap_from_env(self.settings.token_path)   # no-op if file exists or env var not set
         tokens = load_tokens(self.settings.token_path)
         if tokens is None:
             raise NotAuthorizedError(

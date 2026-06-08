@@ -30,6 +30,38 @@ class TokenData:
         return time.time() >= (self.refresh_token_expires_at - leeway)
 
 
+def bootstrap_from_env(path: str) -> bool:
+    """Seed tokens.json from QBO_TOKENS_JSON environment variable.
+
+    Call this once on server startup (before load_tokens). If QBO_TOKENS_JSON
+    is set and tokens.json doesn't exist yet, the env var content is decoded
+    and written to disk. Normal read/write then proceeds via the file.
+
+    Returns True if the file was written, False otherwise.
+    """
+    import base64
+
+    env_val = os.getenv("QBO_TOKENS_JSON", "").strip()
+    if not env_val:
+        return False
+    if os.path.exists(path):
+        return False   # file already there — don't overwrite
+    try:
+        decoded = base64.b64decode(env_val).decode("utf-8")
+        json.loads(decoded)  # validate it's parseable before writing
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(decoded)
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return True
+    except Exception:
+        return False
+
+
 def save_tokens(path: str, data: TokenData) -> None:
     """Atomically write tokens to disk with 0600 permissions."""
     tmp = f"{path}.tmp"
