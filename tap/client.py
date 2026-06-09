@@ -118,10 +118,6 @@ class TapClient:
             "source": {"id": "src_all"},
             "redirect": {"url": req.redirect_url},
             "post":     {"url": req.webhook_url},
-            "expiry": {"period": 10080, "type": "MINUTE"},
-            "transaction": {
-                "expiry": {"period": 10080, "type": "MINUTE"},
-            },
         }
 
         # Include phone only when both parts are present

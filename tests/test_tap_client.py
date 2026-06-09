@@ -106,10 +106,10 @@ class TestBuildChargeBody:
         assert body["reference"]["transaction"] == "INV-1089"
         assert body["reference"]["order"]       == "42"
 
-    def test_expiry_is_7_days_in_minutes(self):
+    def test_no_expiry_in_charge_payload(self):
         body = TapClient._build_charge_body(_make_request())
-        assert body["expiry"] == {"period": 10080, "type": "MINUTE"}
-        assert body["transaction"]["expiry"] == {"period": 10080, "type": "MINUTE"}
+        assert "expiry" not in body
+        assert "transaction" not in body
 
     def test_metadata_forwarded(self):
         body = TapClient._build_charge_body(_make_request())
