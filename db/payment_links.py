@@ -178,15 +178,21 @@ def bootstrap_links_from_file(path: str | None = None) -> int:
     if not isinstance(records, list):
         return 0
 
+    init_table()
     imported = 0
     for rec in records:
         if not isinstance(rec, dict):
             continue
         try:
+            invoice_id = str(rec["invoice_id"])
+            tap_charge_id = str(rec["tap_charge_id"])
+            existing = get_by_invoice_id(invoice_id)
+            if existing and existing.get("tap_charge_id") != tap_charge_id:
+                delete_by_invoice_id(invoice_id)
             if register_existing_link(
-                invoice_id=str(rec["invoice_id"]),
+                invoice_id=invoice_id,
                 customer_id=str(rec["customer_id"]),
-                tap_charge_id=str(rec["tap_charge_id"]),
+                tap_charge_id=tap_charge_id,
                 payment_url=str(rec.get("payment_url") or ""),
                 amount=float(rec["amount"]),
                 currency=str(rec.get("currency") or "KWD"),
