@@ -30,7 +30,7 @@ GOOD_CHARGE_RESPONSE = {
     "currency": "KWD",
     "transaction": {
         "url": "https://checkout.tap.company/v2/session/chg_TS07",
-        "expiry": {"period": 7, "type": "DAY"},
+        "expiry": {"period": 10080, "type": "MINUTE"},
     },
     "customer": {"id": "cus_TS01A_xxx"},
 }
@@ -106,10 +106,10 @@ class TestBuildChargeBody:
         assert body["reference"]["transaction"] == "INV-1089"
         assert body["reference"]["order"]       == "42"
 
-    def test_expiry_is_7_days(self):
+    def test_expiry_is_7_days_in_minutes(self):
         body = TapClient._build_charge_body(_make_request())
-        assert body["expiry"] == {"period": 7, "type": "DAY"}
-        assert body["transaction"]["expiry"] == {"period": 7, "type": "DAY"}
+        assert body["expiry"] == {"period": 10080, "type": "MINUTE"}
+        assert body["transaction"]["expiry"] == {"period": 10080, "type": "MINUTE"}
 
     def test_metadata_forwarded(self):
         body = TapClient._build_charge_body(_make_request())
