@@ -118,9 +118,9 @@ class TapClient:
             "source": {"id": "src_all"},
             "redirect": {"url": req.redirect_url},
             "post":     {"url": req.webhook_url},
-            "expiry": {"period": 7, "type": "D"},
+            "expiry": {"period": 7, "type": "DAY"},
             "transaction": {
-                "expiry": {"period": 7, "type": "D"},
+                "expiry": {"period": 7, "type": "DAY"},
             },
         }
 
