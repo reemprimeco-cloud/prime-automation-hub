@@ -76,6 +76,22 @@ class TapClient:
         resp_json = self._post("/charges", body)
         return self._parse_charge_response(resp_json)
 
+    def get_charge(self, charge_id: str) -> dict[str, Any]:
+        """Retrieve an existing charge by ID."""
+        url = f"{_BASE_URL}/charges/{charge_id}"
+        try:
+            resp = self._session.get(url, timeout=self._timeout)
+        except requests.exceptions.RequestException as exc:
+            raise TapError(f"Tap retrieve charge failed: {exc}") from exc
+
+        if not resp.ok:
+            self._raise_client_error(resp)
+
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise TapParseError(f"Tap returned non-JSON: {resp.text[:200]}") from exc
+
     # ── request building ──────────────────────────────────────────────────────
 
     @staticmethod
@@ -102,8 +118,9 @@ class TapClient:
             "source": {"id": "src_all"},
             "redirect": {"url": req.redirect_url},
             "post":     {"url": req.webhook_url},
+            "expiry": {"period": 7, "type": "D"},
             "transaction": {
-                "expiry": {"period": req.expiry_minutes, "type": "MINUTE"}
+                "expiry": {"period": 7, "type": "D"},
             },
         }
 

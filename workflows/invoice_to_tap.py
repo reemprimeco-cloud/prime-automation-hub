@@ -26,6 +26,8 @@ from tap.models import CreateChargeRequest, TapCustomer, TapPhoneNumber
 
 _LOG = get_logger("workflow.invoice_to_tap")
 
+_STALE_CHARGE_STATUSES = frozenset({"CANCELLED", "ABANDONED", "EXPIRED"})
+
 
 # ── result types ──────────────────────────────────────────────────────────────
 
@@ -110,6 +112,29 @@ def _build_private_note(
     return "\n\n".join(parts)
 
 
+def _existing_link_result(existing: dict) -> LinkResult:
+    """Build a LinkResult from a stored payment_links row."""
+    return LinkResult(
+        invoice_id=existing["invoice_id"],
+        invoice_number=existing.get("invoice_number", ""),
+        customer_name=existing.get("customer_name", ""),
+        amount=existing["amount"],
+        currency=existing["currency"],
+        tap_charge_id=existing["tap_charge_id"],
+        payment_url=existing["payment_url"],
+        status="EXISTING_LINK_RETURNED",
+        qbo_note_updated=bool(existing["qbo_note_updated"]),
+        created_at=existing["created_at"],
+    )
+
+
+def _is_stale_tap_charge(tap_client: TapClient, tap_charge_id: str) -> bool:
+    """True when the Tap charge can no longer be paid and should be regenerated."""
+    charge = tap_client.get_charge(tap_charge_id)
+    status = str(charge.get("status", "")).upper()
+    return status in _STALE_CHARGE_STATUSES
+
+
 # ── main entry point ──────────────────────────────────────────────────────────
 
 def process_invoice(
@@ -135,22 +160,30 @@ def process_invoice(
     db.init_table()
     existing = db.get_by_invoice_id(invoice_id)
     if existing:
-        _LOG.info(
-            "idempotency_hit",
-            extra={"invoice_id": invoice_id, "tap_charge_id": existing["tap_charge_id"]},
-        )
-        return LinkResult(
-            invoice_id=invoice_id,
-            invoice_number=existing.get("invoice_number", ""),
-            customer_name=existing.get("customer_name", ""),
-            amount=existing["amount"],
-            currency=existing["currency"],
-            tap_charge_id=existing["tap_charge_id"],
-            payment_url=existing["payment_url"],
-            status="EXISTING_LINK_RETURNED",
-            qbo_note_updated=bool(existing["qbo_note_updated"]),
-            created_at=existing["created_at"],
-        )
+        tap_charge_id = existing["tap_charge_id"]
+        try:
+            if _is_stale_tap_charge(tap_client, tap_charge_id):
+                _LOG.info(
+                    "stale_charge_regenerating",
+                    extra={"invoice_id": invoice_id, "tap_charge_id": tap_charge_id},
+                )
+                db.delete_by_invoice_id(invoice_id)
+            else:
+                _LOG.info(
+                    "idempotency_hit",
+                    extra={"invoice_id": invoice_id, "tap_charge_id": tap_charge_id},
+                )
+                return _existing_link_result(existing)
+        except TapError as exc:
+            _LOG.warning(
+                "stale_charge_check_failed",
+                extra={
+                    "invoice_id": invoice_id,
+                    "tap_charge_id": tap_charge_id,
+                    "error": str(exc),
+                },
+            )
+            return _existing_link_result(existing)
 
     # ── 2. Fetch + validate invoice ───────────────────────────────────────────
     invoice = qbo_client.get_invoice(invoice_id)
@@ -192,7 +225,6 @@ def process_invoice(
             "invoice_number": invoice_number,
             "qbo_customer_id": qbo_customer_id,
         },
-        expiry_minutes=60,
     )
 
     # ── 5. Create Tap payment link ────────────────────────────────────────────

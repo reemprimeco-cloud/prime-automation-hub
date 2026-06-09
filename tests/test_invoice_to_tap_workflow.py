@@ -175,12 +175,36 @@ class TestProcessInvoice:
             "created_at": "2026-01-01T00:00:00Z",
         }
         qbo, tap = _make_workflow_mocks(monkeypatch, existing_link=existing)
+        tap.get_charge.return_value = {"id": "chg_existing", "status": "INITIATED"}
         result = process_invoice("42", qbo_client=qbo, tap_client=tap, settings=_settings())
         assert isinstance(result, LinkResult)
         assert result.status == "EXISTING_LINK_RETURNED"
         assert result.payment_url == "https://old.link"
         tap.create_charge.assert_not_called()
         qbo.get_invoice.assert_not_called()
+
+    def test_stale_charge_regenerates_link(self, monkeypatch):
+        existing = {
+            "invoice_id": "42", "tap_charge_id": "chg_stale", "invoice_number": "1089",
+            "customer_name": "Al-Rashid", "amount": 250.0, "currency": "KWD",
+            "payment_url": "https://old.link", "qbo_note_updated": 1,
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        qbo, tap = _make_workflow_mocks(monkeypatch, existing_link=existing)
+        tap.get_charge.return_value = {"id": "chg_stale", "status": "ABANDONED"}
+        deleted = []
+
+        def fake_delete(invoice_id):
+            deleted.append(invoice_id)
+            return True
+
+        monkeypatch.setattr(db_module, "delete_by_invoice_id", fake_delete)
+        result = process_invoice("42", qbo_client=qbo, tap_client=tap, settings=_settings())
+        assert isinstance(result, LinkResult)
+        assert result.status == "LINK_GENERATED"
+        assert result.tap_charge_id == "chg_TS07test"
+        assert deleted == ["42"]
+        tap.create_charge.assert_called_once()
 
     def test_paid_invoice_returns_skip_result(self, monkeypatch):
         qbo, tap = _make_workflow_mocks(monkeypatch)

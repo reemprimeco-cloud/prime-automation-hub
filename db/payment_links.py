@@ -286,6 +286,21 @@ def mark_whatsapp_failed(invoice_id: str, *, error: str) -> None:
 
 # ── reads ─────────────────────────────────────────────────────────────────────
 
+def delete_by_invoice_id(invoice_id: str) -> bool:
+    """Remove a payment link record (e.g. stale Tap charge). Returns True if deleted."""
+    init_table()
+    with get_connection() as conn:
+        cur = conn.execute(
+            "DELETE FROM payment_links WHERE invoice_id = ?",
+            (invoice_id,),
+        )
+        conn.commit()
+        deleted = cur.rowcount > 0
+    if deleted:
+        _LOG.info("payment_link_deleted", extra={"invoice_id": invoice_id})
+    return deleted
+
+
 def get_by_invoice_id(invoice_id: str) -> Optional[dict]:
     """Return the payment link record for a QBO invoice ID, or None."""
     with get_connection() as conn:
