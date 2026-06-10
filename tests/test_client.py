@@ -135,6 +135,25 @@ def test_get_customer_by_id_uses_direct_endpoint(monkeypatch):
     assert c.mobile       == "415-555-5678"
 
 
+def test_get_customer_by_id_reads_notes(monkeypatch):
+    payload = {
+        "Customer": {
+            "Id": "42",
+            "DisplayName": "Alice's Hardware",
+            "Notes": "BANK_TRANSFER",
+        }
+    }
+    client, _ = _make_client(monkeypatch, payload)
+    c = client.get_customer_by_id("42")
+    assert c.notes == "BANK_TRANSFER"
+
+
+def test_customer_from_qbo_reads_notes():
+    raw = {"Id": "1", "DisplayName": "Test Co", "Notes": "  bank transfer preferred  "}
+    c = Customer.from_qbo(raw)
+    assert c.notes == "bank transfer preferred"
+
+
 def test_get_customer_by_id_accepts_integer(monkeypatch):
     """customer_id may be passed as an int (common when reading from a DB)."""
     payload = {"Customer": {"Id": "99", "DisplayName": "Dave"}}

@@ -221,6 +221,41 @@ class TestProcessInvoice:
         assert isinstance(result, SkipResult)
         assert result.reason == "VOIDED"
 
+    def test_bank_transfer_customer_skips_tap_charge(self, monkeypatch):
+        from qbo.models import Customer
+
+        qbo, tap = _make_workflow_mocks(monkeypatch)
+        qbo.get_customer_by_id.return_value = Customer(
+            id="99", display_name="Ahmed Al-Rashid",
+            email="ahmed@example.com",
+            phone="+96524001234",
+            mobile="+96565068000",
+            alternate_phone="",
+            notes="BANK_TRANSFER",
+        )
+        result = process_invoice("42", qbo_client=qbo, tap_client=tap, settings=_settings())
+        assert isinstance(result, SkipResult)
+        assert result.reason == "BANK_TRANSFER"
+        assert "bank transfer" in result.detail.lower()
+        tap.create_charge.assert_not_called()
+
+    def test_bank_transfer_match_is_case_insensitive(self, monkeypatch):
+        from qbo.models import Customer
+
+        qbo, tap = _make_workflow_mocks(monkeypatch)
+        qbo.get_customer_by_id.return_value = Customer(
+            id="99", display_name="Ahmed Al-Rashid",
+            email="ahmed@example.com",
+            phone="+96524001234",
+            mobile="+96565068000",
+            alternate_phone="",
+            notes="Please use bank_transfer for this account",
+        )
+        result = process_invoice("42", qbo_client=qbo, tap_client=tap, settings=_settings())
+        assert isinstance(result, SkipResult)
+        assert result.reason == "BANK_TRANSFER"
+        tap.create_charge.assert_not_called()
+
     def test_qbo_update_failure_does_not_fail_workflow(self, monkeypatch):
         """Even if QBO PrivateNote update fails, the DB record is saved and result is returned."""
         from qbo.client import QBOError

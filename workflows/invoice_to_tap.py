@@ -53,7 +53,8 @@ class LinkResult:
 class SkipResult:
     """Returned when the invoice should not get a payment link."""
     invoice_id: str
-    reason: str               # "ALREADY_PAID" | "VOIDED" | "ZERO_BALANCE"
+    reason: str               # "ALREADY_PAID" | "VOIDED" | "BANK_TRANSFER"
+    detail: str = ""
 
 
 # ── invoice validation ────────────────────────────────────────────────────────
@@ -202,6 +203,14 @@ def process_invoice(
 
     # ── 3. Fetch customer ─────────────────────────────────────────────────────
     customer = qbo_client.get_customer_by_id(qbo_customer_id)
+
+    if "BANK_TRANSFER" in (customer.notes or "").upper():
+        _LOG.info("workflow_skipped_bank_transfer", extra={"invoice_id": invoice_id})
+        return SkipResult(
+            invoice_id=invoice_id,
+            reason="BANK_TRANSFER",
+            detail="Customer prefers bank transfer — no Tap link generated.",
+        )
 
     # ── 4. Build Tap request ──────────────────────────────────────────────────
     first, last = _split_name(customer.display_name or customer_display_name)

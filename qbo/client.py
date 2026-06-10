@@ -254,7 +254,9 @@ class QuickBooksClient:
         Raises QBOError (wrapping a 404) if the customer does not exist.
         """
         data = self._request("GET", f"{self._base_path()}/customer/{customer_id}")
-        return Customer.from_qbo(data["Customer"])
+        raw = data["Customer"]
+        customer = Customer.from_qbo(raw)
+        return customer
 
     def get_invoices(
         self, max_results: int = 10, order_by: str = "TxnDate DESC"

@@ -163,7 +163,11 @@ def main() -> None:
     _hr("═")
 
     if isinstance(result, SkipResult):
+        if result.reason == "BANK_TRANSFER":
+            print("  ⚡ Skipped — customer set to BANK_TRANSFER")
         _fail("Invoice skipped", result.reason)
+        if result.detail:
+            _line(result.detail)
         _hr("═")
         print()
         return

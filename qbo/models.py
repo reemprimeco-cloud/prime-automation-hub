@@ -29,6 +29,7 @@ class Customer:
     phone: str            # PrimaryPhone.FreeFormNumber
     mobile: str           # Mobile.FreeFormNumber
     alternate_phone: str  # AlternatePhone.FreeFormNumber
+    notes: str = ""       # Notes
 
     @classmethod
     def from_qbo(cls, data: dict) -> "Customer":
@@ -40,4 +41,5 @@ class Customer:
             phone=_nested(data, "PrimaryPhone", "FreeFormNumber"),
             mobile=_nested(data, "Mobile", "FreeFormNumber"),
             alternate_phone=_nested(data, "AlternatePhone", "FreeFormNumber"),
+            notes=(data.get("Notes") or "").strip(),
         )
