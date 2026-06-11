@@ -91,7 +91,7 @@ def test_send_variables_include_all_four():
         assert variables["5"] == "https://connect.intuit.com/portal/app/invoice/view/123"
 
 
-def test_send_variables_use_na_when_invoice_link_missing():
+def test_send_variables_use_empty_string_when_invoice_link_missing():
     import json
     with patch("twilio.rest.Client") as MockClient:
         mock_instance = MockClient.return_value
@@ -106,7 +106,7 @@ def test_send_variables_use_na_when_invoice_link_missing():
         )
         call_kwargs = mock_instance.messages.create.call_args.kwargs
         variables = json.loads(call_kwargs["content_variables"])
-        assert variables["5"] == "N/A"
+        assert variables["5"] == ""
 
 
 def test_send_returns_message_result_on_success():

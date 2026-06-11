@@ -11,7 +11,7 @@ Payment link (5 vars):
   {{2}} invoice number
   {{3}} amount  e.g. "48.000 KWD"
   {{4}} payment URL
-  {{5}} QBO invoice link (or "N/A")
+  {{5}} QBO invoice link (empty when missing)
 
 Payment confirmation (3 vars):
   {{1}} customer first name
@@ -80,7 +80,7 @@ class WhatsAppClient:
             "2": invoice_number,
             "3": f"{float(amount):.3f} {currency}",
             "4": payment_url,
-            "5": invoice_link if invoice_link else "N/A",
+            "5": invoice_link if invoice_link else "",
         }
         _LOG.info(
             "whatsapp_payment_link_attempt",
