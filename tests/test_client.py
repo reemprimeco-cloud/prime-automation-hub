@@ -250,4 +250,6 @@ def test_create_payment_posts_linked_payment(monkeypatch):
     assert body["CustomerRef"]["value"] == "99"
     assert body["TotalAmt"] == 48.0
     assert body["Line"][0]["LinkedTxn"][0]["TxnId"] == "9258"
+    assert body["PaymentMethodRef"] == {"value": "1000000001"}
+    assert body["DepositToAccountRef"] == {"value": "29"}
     assert "chg_test" in body["PrivateNote"]

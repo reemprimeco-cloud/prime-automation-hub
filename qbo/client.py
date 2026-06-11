@@ -165,6 +165,8 @@ class QuickBooksClient:
         body: dict[str, Any] = {
             "TotalAmt": round(amount, 3),
             "CustomerRef": {"value": customer_id},
+            "PaymentMethodRef": {"value": "1000000001"},
+            "DepositToAccountRef": {"value": "29"},
             "Line": [
                 {
                     "Amount": round(amount, 3),
