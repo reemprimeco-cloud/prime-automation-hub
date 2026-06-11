@@ -1,7 +1,7 @@
 """Twilio WhatsApp client for sending payment notifications.
 
 Two templates:
-  content_sid               — payment link  (prime_invoice_payment)
+  content_sid               — payment link  (prime_invoice_payment_v2)
   confirmation_content_sid  — payment received (prime_payment_confirmation)
 
 Template variable conventions
