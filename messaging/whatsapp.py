@@ -6,11 +6,12 @@ Two templates:
 
 Template variable conventions
 ------------------------------
-Payment link (4 vars):
+Payment link (5 vars):
   {{1}} customer first name
   {{2}} invoice number
   {{3}} amount  e.g. "48.000 KWD"
   {{4}} payment URL
+  {{5}} QBO invoice link (or "N/A")
 
 Payment confirmation (3 vars):
   {{1}} customer first name
@@ -71,6 +72,7 @@ class WhatsAppClient:
         amount: float,
         currency: str = "KWD",
         payment_url: str,
+        invoice_link: str = "",
     ) -> MessageResult:
         """Send payment link template to a customer."""
         variables = {
@@ -78,6 +80,7 @@ class WhatsAppClient:
             "2": invoice_number,
             "3": f"{float(amount):.3f} {currency}",
             "4": payment_url,
+            "5": invoice_link if invoice_link else "N/A",
         }
         _LOG.info(
             "whatsapp_payment_link_attempt",

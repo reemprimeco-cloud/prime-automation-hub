@@ -142,19 +142,45 @@ async def receive_tap_webhook(request: Request) -> dict:
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
-    charge_id     = payload.get("id", "")
-    charge_status = payload.get("status", "")
-    amount        = float(payload.get("amount", 0))
-    currency      = payload.get("currency", "KWD")
+    tap_id = payload.get("id", "")
+    tap_object = payload.get("object", "")
 
-    _LOG.info("tap_webhook_received",
-              extra={"charge_id": charge_id, "status": charge_status})
+    if tap_id.startswith("inv_") or tap_object == "invoice":
+        tap_status = payload.get("status", "")
+        amount = float(payload.get("amount", 0))
+        currency = payload.get("currency", "KWD")
 
-    if charge_status != "CAPTURED":
-        return {"status": "ignored", "charge_status": charge_status}
+        _LOG.info(
+            "tap_invoice_webhook_received",
+            extra={"invoice_id": tap_id, "status": tap_status},
+        )
 
-    if not charge_id:
-        raise HTTPException(status_code=400, detail="Missing charge id")
+        if tap_status != "PAID":
+            return {"status": "ignored", "tap_status": tap_status}
+
+        if not tap_id:
+            raise HTTPException(status_code=400, detail="Missing invoice id")
+
+        capture_ref = tap_id
+        transactions = payload.get("transactions") or []
+        if transactions:
+            capture_ref = str(transactions[0].get("id") or tap_id)
+    else:
+        charge_id = tap_id
+        charge_status = payload.get("status", "")
+        amount = float(payload.get("amount", 0))
+        currency = payload.get("currency", "KWD")
+
+        _LOG.info("tap_webhook_received",
+                  extra={"charge_id": charge_id, "status": charge_status})
+
+        if charge_status != "CAPTURED":
+            return {"status": "ignored", "charge_status": charge_status}
+
+        if not charge_id:
+            raise HTTPException(status_code=400, detail="Missing charge id")
+
+        capture_ref = charge_id
 
     try:
         from config import get_settings
@@ -169,9 +195,11 @@ async def receive_tap_webhook(request: Request) -> dict:
         wa       = whatsapp_client_from_settings(settings)
 
         result = handle_payment_capture(
-            charge_id, amount, currency,
+            tap_id if (tap_id.startswith("inv_") or tap_object == "invoice") else capture_ref,
+            amount, currency,
             qbo_client=qbo,
             whatsapp_client=wa,
+            tap_payment_ref=capture_ref,
         )
 
         if isinstance(result, CaptureError):

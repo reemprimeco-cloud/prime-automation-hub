@@ -58,13 +58,14 @@ def _qbo_customer():
     )
 
 
-def _tap_charge_resp():
-    from tap.models import ChargeResponse
-    return ChargeResponse(
-        charge_id="chg_TS07test",
-        payment_url="https://checkout.tap.company/v2/session/test",
-        status="INITIATED",
-        amount=250.0, currency="KWD",
+def _tap_invoice_resp():
+    from tap.models import InvoiceResponse
+    return InvoiceResponse(
+        id="inv_TS07test",
+        url="https://tap.company/invoice/inv_TS07test",
+        status="CREATED",
+        amount=250.0,
+        currency="KWD",
         tap_customer_id="cus_test",
     )
 
@@ -82,7 +83,7 @@ def _make_workflow_mocks(monkeypatch, *, existing_link=None):
     qbo.update_invoice_note.return_value = {}
 
     tap = MagicMock()
-    tap.create_charge.return_value = _tap_charge_resp()
+    tap.create_tap_invoice.return_value = _tap_invoice_resp()
 
     return qbo, tap
 
@@ -156,8 +157,8 @@ class TestProcessInvoice:
         result = process_invoice("42", qbo_client=qbo, tap_client=tap, settings=_settings())
         assert isinstance(result, LinkResult)
         assert result.status == "LINK_GENERATED"
-        assert result.tap_charge_id == "chg_TS07test"
-        assert "checkout.tap.company" in result.payment_url
+        assert result.tap_charge_id == "inv_TS07test"
+        assert "tap.company/invoice" in result.payment_url
         assert result.invoice_id == "42"
 
     def test_happy_path_calls_qbo_update(self, monkeypatch):
@@ -169,29 +170,29 @@ class TestProcessInvoice:
 
     def test_idempotency_returns_existing_link(self, monkeypatch):
         existing = {
-            "invoice_id": "42", "tap_charge_id": "chg_existing", "invoice_number": "1089",
+            "invoice_id": "42", "tap_charge_id": "inv_existing", "invoice_number": "1089",
             "customer_name": "Al-Rashid", "amount": 250.0, "currency": "KWD",
             "payment_url": "https://old.link", "qbo_note_updated": 1,
             "created_at": "2026-01-01T00:00:00Z",
         }
         qbo, tap = _make_workflow_mocks(monkeypatch, existing_link=existing)
-        tap.get_charge.return_value = {"id": "chg_existing", "status": "INITIATED"}
+        tap.get_tap_invoice.return_value = {"id": "inv_existing", "status": "CREATED"}
         result = process_invoice("42", qbo_client=qbo, tap_client=tap, settings=_settings())
         assert isinstance(result, LinkResult)
         assert result.status == "EXISTING_LINK_RETURNED"
         assert result.payment_url == "https://old.link"
-        tap.create_charge.assert_not_called()
+        tap.create_tap_invoice.assert_not_called()
         qbo.get_invoice.assert_not_called()
 
     def test_stale_charge_regenerates_link(self, monkeypatch):
         existing = {
-            "invoice_id": "42", "tap_charge_id": "chg_stale", "invoice_number": "1089",
+            "invoice_id": "42", "tap_charge_id": "inv_stale", "invoice_number": "1089",
             "customer_name": "Al-Rashid", "amount": 250.0, "currency": "KWD",
             "payment_url": "https://old.link", "qbo_note_updated": 1,
             "created_at": "2026-01-01T00:00:00Z",
         }
         qbo, tap = _make_workflow_mocks(monkeypatch, existing_link=existing)
-        tap.get_charge.return_value = {"id": "chg_stale", "status": "ABANDONED"}
+        tap.get_tap_invoice.return_value = {"id": "inv_stale", "status": "EXPIRED"}
         deleted = []
 
         def fake_delete(invoice_id):
@@ -202,9 +203,9 @@ class TestProcessInvoice:
         result = process_invoice("42", qbo_client=qbo, tap_client=tap, settings=_settings())
         assert isinstance(result, LinkResult)
         assert result.status == "LINK_GENERATED"
-        assert result.tap_charge_id == "chg_TS07test"
+        assert result.tap_charge_id == "inv_TS07test"
         assert deleted == ["42"]
-        tap.create_charge.assert_called_once()
+        tap.create_tap_invoice.assert_called_once()
 
     def test_paid_invoice_returns_skip_result(self, monkeypatch):
         qbo, tap = _make_workflow_mocks(monkeypatch)
@@ -212,7 +213,7 @@ class TestProcessInvoice:
         result = process_invoice("42", qbo_client=qbo, tap_client=tap, settings=_settings())
         assert isinstance(result, SkipResult)
         assert result.reason == "ALREADY_PAID"
-        tap.create_charge.assert_not_called()
+        tap.create_tap_invoice.assert_not_called()
 
     def test_voided_invoice_returns_skip_result(self, monkeypatch):
         qbo, tap = _make_workflow_mocks(monkeypatch)
@@ -237,7 +238,7 @@ class TestProcessInvoice:
         assert isinstance(result, SkipResult)
         assert result.reason == "BANK_TRANSFER"
         assert "bank transfer" in result.detail.lower()
-        tap.create_charge.assert_not_called()
+        tap.create_tap_invoice.assert_not_called()
 
     def test_bank_transfer_match_is_case_insensitive(self, monkeypatch):
         from qbo.models import Customer
@@ -254,7 +255,7 @@ class TestProcessInvoice:
         result = process_invoice("42", qbo_client=qbo, tap_client=tap, settings=_settings())
         assert isinstance(result, SkipResult)
         assert result.reason == "BANK_TRANSFER"
-        tap.create_charge.assert_not_called()
+        tap.create_tap_invoice.assert_not_called()
 
     def test_qbo_update_failure_does_not_fail_workflow(self, monkeypatch):
         """Even if QBO PrivateNote update fails, the DB record is saved and result is returned."""
@@ -264,7 +265,7 @@ class TestProcessInvoice:
         result = process_invoice("42", qbo_client=qbo, tap_client=tap, settings=_settings())
         assert isinstance(result, LinkResult)
         assert result.qbo_note_updated is False   # flagged but not fatal
-        assert result.tap_charge_id == "chg_TS07test"
+        assert result.tap_charge_id == "inv_TS07test"
 
     def test_tap_failure_does_not_write_to_db(self, monkeypatch):
         """If Tap fails, we must not insert a partial record into the DB."""
@@ -276,7 +277,7 @@ class TestProcessInvoice:
 
         qbo, tap = _make_workflow_mocks(monkeypatch)
         monkeypatch.setattr(db_module, "create_link", fake_create_link)
-        tap.create_charge.side_effect = TapServerError("Server down", status_code=503)
+        tap.create_tap_invoice.side_effect = TapServerError("Server down", status_code=503)
 
         with pytest.raises(TapServerError):
             process_invoice("42", qbo_client=qbo, tap_client=tap, settings=_settings())

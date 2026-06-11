@@ -40,6 +40,17 @@ class CreateChargeRequest:
 
 
 @dataclass
+class InvoiceResponse:
+    """Parsed response from Tap's create-invoice endpoint."""
+    id: str                 # e.g. "inv_kN0e13110124xGi527019"
+    status: str             # "CREATED" for a fresh invoice link
+    url: str                # hosted invoice URL to share with the customer
+    amount: float = 0.0
+    currency: str = ""
+    tap_customer_id: str = ""
+
+
+@dataclass
 class ChargeResponse:
     """Parsed response from Tap's create-charge endpoint."""
     charge_id: str          # e.g. "chg_TS07A5020231643Obe10906052"

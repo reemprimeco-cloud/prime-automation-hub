@@ -1,6 +1,6 @@
 """Tap Payments API client.
 
-Wraps the Tap v2 charges endpoint with:
+Wraps Tap v2 invoices and charges endpoints with:
   * Bearer-token authentication
   * Structured request/response logging (no secret values leaked)
   * Exponential-backoff retry for transient server errors (5xx) and network failures
@@ -14,8 +14,8 @@ Usage
     from config import get_settings
 
     client = tap_client_from_settings(get_settings())
-    response = client.create_charge(request)
-    print(response.payment_url)
+    response = client.create_tap_invoice(request)
+    print(response.url)
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from tap.exceptions import (
     TapAuthError, TapClientError, TapError,
     TapParseError, TapRateLimitError, TapServerError,
 )
-from tap.models import ChargeResponse, CreateChargeRequest
+from tap.models import ChargeResponse, CreateChargeRequest, InvoiceResponse
 
 _LOG = get_logger("tap.client")
 
@@ -55,6 +55,26 @@ class TapClient:
         })
 
     # ── public API ────────────────────────────────────────────────────────────
+
+    def create_tap_invoice(self, req: CreateChargeRequest) -> InvoiceResponse:
+        """Create a Tap invoice with a hosted payment URL (7-day due/expiry).
+
+        Returns an InvoiceResponse with status='CREATED' and a valid url.
+        Raises TapError (or a subclass) on any failure.
+        """
+        body = self._build_invoice_body(req)
+        _LOG.info(
+            "tap_create_invoice",
+            extra={
+                "amount": req.amount,
+                "currency": req.currency,
+                "description": req.description,
+                "transaction_ref": req.transaction_ref,
+                "order_ref": req.order_ref,
+            },
+        )
+        resp_json = self._post("/invoices", body)
+        return self._parse_invoice_response(resp_json)
 
     def create_charge(self, req: CreateChargeRequest) -> ChargeResponse:
         """Create a hosted payment link.
@@ -92,7 +112,67 @@ class TapClient:
         except ValueError as exc:
             raise TapParseError(f"Tap returned non-JSON: {resp.text[:200]}") from exc
 
+    def get_tap_invoice(self, invoice_id: str) -> dict[str, Any]:
+        """Retrieve an existing Tap invoice by ID."""
+        url = f"{_BASE_URL}/invoices/{invoice_id}"
+        try:
+            resp = self._session.get(url, timeout=self._timeout)
+        except requests.exceptions.RequestException as exc:
+            raise TapError(f"Tap retrieve invoice failed: {exc}") from exc
+
+        if not resp.ok:
+            self._raise_client_error(resp)
+
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise TapParseError(f"Tap returned non-JSON: {resp.text[:200]}") from exc
+
     # ── request building ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _build_invoice_body(req: CreateChargeRequest) -> dict[str, Any]:
+        expiry_ms = int((time.time() + 7 * 24 * 3600) * 1000)
+        body: dict[str, Any] = {
+            "draft": False,
+            "due": expiry_ms,
+            "expiry": expiry_ms,
+            "description": req.description,
+            "mode": "INVOICE",
+            "currencies": [req.currency],
+            "metadata": req.metadata,
+            "customer": {
+                "first_name": req.customer.first_name,
+                "last_name": req.customer.last_name,
+                "email": req.customer.email,
+            },
+            "order": {
+                "amount": round(req.amount, 3),
+                "currency": req.currency,
+            },
+            "redirect": {"url": req.redirect_url},
+            "post": {"url": req.webhook_url},
+            "reference": {
+                "invoice": req.transaction_ref,
+                "order": req.order_ref,
+            },
+            "notifications": {
+                "channels": [],
+                "dispatch": False,
+            },
+        }
+
+        ph = req.customer.phone
+        if ph.country_code and ph.number:
+            body["customer"]["phone"] = {
+                "country_code": ph.country_code,
+                "number": ph.number,
+            }
+
+        if req.customer.tap_customer_id:
+            body["customer"]["id"] = req.customer.tap_customer_id
+
+        return body
 
     @staticmethod
     def _build_charge_body(req: CreateChargeRequest) -> dict[str, Any]:
@@ -174,6 +254,41 @@ class TapClient:
             status=status,
             amount=float(data.get("amount", 0)),
             currency=data.get("currency", ""),
+            tap_customer_id=customer_data.get("id", ""),
+        )
+
+    @staticmethod
+    def _parse_invoice_response(data: dict[str, Any]) -> InvoiceResponse:
+        invoice_id = data.get("id", "")
+        if not invoice_id:
+            raise TapParseError(f"Tap response missing 'id' field: {str(data)[:200]}")
+
+        status = data.get("status", "")
+        url = data.get("url", "")
+
+        if status in {"CREATED", "SAVED"} and not url:
+            raise TapParseError(
+                f"Tap returned {status} status for invoice {invoice_id} "
+                "but did not include url"
+            )
+
+        _LOG.info(
+            "tap_invoice_created",
+            extra={
+                "invoice_id": invoice_id,
+                "status": status,
+                "has_url": bool(url),
+            },
+        )
+
+        customer_data = data.get("customer") or {}
+        order = data.get("order") or {}
+        return InvoiceResponse(
+            id=invoice_id,
+            status=status,
+            url=url,
+            amount=float(order.get("amount", data.get("amount", 0))),
+            currency=str(order.get("currency", data.get("currency", ""))),
             tap_customer_id=customer_data.get("id", ""),
         )
 

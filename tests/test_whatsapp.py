@@ -80,13 +80,33 @@ def test_send_variables_include_all_four():
             invoice_number="2527",
             amount=48.0,
             payment_url="https://checkout.tap.company/test",
+            invoice_link="https://connect.intuit.com/portal/app/invoice/view/123",
         )
         call_kwargs = mock_instance.messages.create.call_args.kwargs
         variables = json.loads(call_kwargs["content_variables"])
         assert variables["1"] == "Dar"          # first name
         assert variables["2"] == "2527"
         assert "48.000 KWD" in variables["3"]
-        assert "checkout.tap.company" in variables["4"]
+        assert variables["4"] == "https://checkout.tap.company/test"
+        assert variables["5"] == "https://connect.intuit.com/portal/app/invoice/view/123"
+
+
+def test_send_variables_use_na_when_invoice_link_missing():
+    import json
+    with patch("twilio.rest.Client") as MockClient:
+        mock_instance = MockClient.return_value
+        mock_instance.messages.create.return_value = _mock_twilio_message()
+        client = WhatsAppClient("AC", "auth", "+96565000000", "HXtest")
+        client.send_payment_link(
+            "+96565068000",
+            customer_name="Dar Haa",
+            invoice_number="2527",
+            amount=48.0,
+            payment_url="https://checkout.tap.company/test",
+        )
+        call_kwargs = mock_instance.messages.create.call_args.kwargs
+        variables = json.loads(call_kwargs["content_variables"])
+        assert variables["5"] == "N/A"
 
 
 def test_send_returns_message_result_on_success():
@@ -134,7 +154,7 @@ def test_workflow_sends_whatsapp_on_happy_path(monkeypatch):
     import time
     from config import Settings
     from qbo.models import Customer
-    from tap.models import ChargeResponse
+    from tap.models import InvoiceResponse
     from workflows.invoice_to_tap import process_invoice, LinkResult
     import db.payment_links as db_module
 
@@ -160,6 +180,7 @@ def test_workflow_sends_whatsapp_on_happy_path(monkeypatch):
         "Id": "42", "SyncToken": "1", "DocNumber": "1089",
         "TotalAmt": 48.0, "Balance": 48.0,
         "CustomerRef": {"value": "99", "name": "Dar Haa"}, "PrivateNote": "",
+        "InvoiceLink": "https://connect.intuit.com/portal/app/invoice/view/42",
     }
     qbo.get_customer_by_id.return_value = Customer(
         id="99", display_name="Dar Haa", email="dar@haa.com",
@@ -168,9 +189,9 @@ def test_workflow_sends_whatsapp_on_happy_path(monkeypatch):
     qbo.update_invoice_note.return_value = {}
 
     tap = MagicMock()
-    tap.create_charge.return_value = ChargeResponse(
-        charge_id="chg_test", payment_url="https://tap.test",
-        status="INITIATED", amount=48.0, currency="KWD", tap_customer_id="cus_x",
+    tap.create_tap_invoice.return_value = InvoiceResponse(
+        id="inv_test", url="https://tap.test/invoice",
+        status="CREATED", amount=48.0, currency="KWD", tap_customer_id="cus_x",
     )
 
     wa = MagicMock()
@@ -183,13 +204,16 @@ def test_workflow_sends_whatsapp_on_happy_path(monkeypatch):
     assert result.whatsapp_sent is True
     assert result.whatsapp_number == "+96565068000"
     wa.send_payment_link.assert_called_once()
+    _, kwargs = wa.send_payment_link.call_args
+    assert kwargs["invoice_link"] == "https://connect.intuit.com/portal/app/invoice/view/42"
+    assert kwargs["payment_url"] == "https://tap.test/invoice"
 
 
 def test_workflow_skips_whatsapp_when_no_client(monkeypatch):
     """Passing whatsapp_client=None skips WhatsApp without error."""
     from config import Settings
     from qbo.models import Customer
-    from tap.models import ChargeResponse
+    from tap.models import InvoiceResponse
     from workflows.invoice_to_tap import process_invoice, LinkResult
     import db.payment_links as db_module
 
@@ -211,6 +235,7 @@ def test_workflow_skips_whatsapp_when_no_client(monkeypatch):
         "Id": "42", "SyncToken": "1", "DocNumber": "1089",
         "TotalAmt": 48.0, "Balance": 48.0,
         "CustomerRef": {"value": "99", "name": "Dar Haa"}, "PrivateNote": "",
+        "InvoiceLink": "https://connect.intuit.com/portal/app/invoice/view/42",
     }
     qbo.get_customer_by_id.return_value = Customer(
         id="99", display_name="Dar Haa", email="",
@@ -219,9 +244,9 @@ def test_workflow_skips_whatsapp_when_no_client(monkeypatch):
     qbo.update_invoice_note.return_value = {}
 
     tap = MagicMock()
-    tap.create_charge.return_value = ChargeResponse(
-        charge_id="chg_x", payment_url="https://tap.test",
-        status="INITIATED", amount=48.0, currency="KWD", tap_customer_id="",
+    tap.create_tap_invoice.return_value = InvoiceResponse(
+        id="inv_x", url="https://tap.test/invoice",
+        status="CREATED", amount=48.0, currency="KWD", tap_customer_id="",
     )
 
     result = process_invoice("42", qbo_client=qbo, tap_client=tap, whatsapp_client=None, settings=settings)
@@ -233,7 +258,7 @@ def test_workflow_does_not_fail_when_whatsapp_errors(monkeypatch):
     """A Twilio error must not fail the workflow — link is still valid."""
     from config import Settings
     from qbo.models import Customer
-    from tap.models import ChargeResponse
+    from tap.models import InvoiceResponse
     from workflows.invoice_to_tap import process_invoice, LinkResult
     import db.payment_links as db_module
 
@@ -258,6 +283,7 @@ def test_workflow_does_not_fail_when_whatsapp_errors(monkeypatch):
         "Id": "42", "SyncToken": "1", "DocNumber": "1089",
         "TotalAmt": 48.0, "Balance": 48.0,
         "CustomerRef": {"value": "99", "name": "Dar Haa"}, "PrivateNote": "",
+        "InvoiceLink": "https://connect.intuit.com/portal/app/invoice/view/42",
     }
     qbo.get_customer_by_id.return_value = Customer(
         id="99", display_name="Dar Haa", email="",
@@ -266,9 +292,9 @@ def test_workflow_does_not_fail_when_whatsapp_errors(monkeypatch):
     qbo.update_invoice_note.return_value = {}
 
     tap = MagicMock()
-    tap.create_charge.return_value = ChargeResponse(
-        charge_id="chg_x", payment_url="https://tap.test",
-        status="INITIATED", amount=48.0, currency="KWD", tap_customer_id="",
+    tap.create_tap_invoice.return_value = InvoiceResponse(
+        id="inv_x", url="https://tap.test/invoice",
+        status="CREATED", amount=48.0, currency="KWD", tap_customer_id="",
     )
 
     wa = MagicMock()
@@ -277,4 +303,4 @@ def test_workflow_does_not_fail_when_whatsapp_errors(monkeypatch):
     result = process_invoice("42", qbo_client=qbo, tap_client=tap, whatsapp_client=wa, settings=settings)
     assert isinstance(result, LinkResult)
     assert result.whatsapp_sent is False
-    assert result.tap_charge_id == "chg_x"   # payment link still valid
+    assert result.tap_charge_id == "inv_x"   # payment link still valid

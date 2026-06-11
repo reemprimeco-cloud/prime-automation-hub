@@ -52,6 +52,7 @@ def handle_payment_capture(
     *,
     qbo_client: QuickBooksClient,
     whatsapp_client=None,
+    tap_payment_ref: str = "",
 ) -> CaptureResult | CaptureError:
     """Process a captured Tap payment end-to-end.
 
@@ -117,7 +118,7 @@ def handle_payment_capture(
             customer_id=customer_id,
             invoice_id=invoice_id,
             amount=link_amount,
-            tap_charge_id=tap_charge_id,
+            tap_charge_id=tap_payment_ref or tap_charge_id,
         )
         qbo_payment_id = str(payment.get("Id", ""))
         _LOG.info(

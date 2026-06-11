@@ -27,6 +27,7 @@ from tap.models import CreateChargeRequest, TapCustomer, TapPhoneNumber
 _LOG = get_logger("workflow.invoice_to_tap")
 
 _STALE_CHARGE_STATUSES = frozenset({"CANCELLED", "ABANDONED", "EXPIRED"})
+_STALE_INVOICE_STATUSES = frozenset({"CANCELLED", "EXPIRED", "PAID"})
 
 
 # ── result types ──────────────────────────────────────────────────────────────
@@ -129,9 +130,14 @@ def _existing_link_result(existing: dict) -> LinkResult:
     )
 
 
-def _is_stale_tap_charge(tap_client: TapClient, tap_charge_id: str) -> bool:
-    """True when the Tap charge can no longer be paid and should be regenerated."""
-    charge = tap_client.get_charge(tap_charge_id)
+def _is_stale_tap_link(tap_client: TapClient, tap_reference_id: str) -> bool:
+    """True when the Tap link can no longer be paid and should be regenerated."""
+    if tap_reference_id.startswith("inv_"):
+        invoice = tap_client.get_tap_invoice(tap_reference_id)
+        status = str(invoice.get("status", "")).upper()
+        return status in _STALE_INVOICE_STATUSES
+
+    charge = tap_client.get_charge(tap_reference_id)
     status = str(charge.get("status", "")).upper()
     return status in _STALE_CHARGE_STATUSES
 
@@ -163,10 +169,10 @@ def process_invoice(
     if existing:
         tap_charge_id = existing["tap_charge_id"]
         try:
-            if _is_stale_tap_charge(tap_client, tap_charge_id):
+            if _is_stale_tap_link(tap_client, tap_charge_id):
                 _LOG.info(
-                    "stale_charge_regenerating",
-                    extra={"invoice_id": invoice_id, "tap_charge_id": tap_charge_id},
+                    "stale_link_regenerating",
+                    extra={"invoice_id": invoice_id, "tap_reference_id": tap_charge_id},
                 )
                 db.delete_by_invoice_id(invoice_id)
             else:
@@ -200,6 +206,7 @@ def process_invoice(
     customer_ref    = invoice.get("CustomerRef") or {}
     qbo_customer_id = str(customer_ref.get("value", ""))
     customer_display_name = str(customer_ref.get("name", ""))
+    invoice_link = invoice.get("InvoiceLink", "")
 
     # ── 3. Fetch customer ─────────────────────────────────────────────────────
     customer = qbo_client.get_customer_by_id(qbo_customer_id)
@@ -236,16 +243,16 @@ def process_invoice(
         },
     )
 
-    # ── 5. Create Tap payment link ────────────────────────────────────────────
-    charge = tap_client.create_charge(tap_request)
+    # ── 5. Create Tap invoice link ──────────────────────────────────────────────
+    tap_invoice = tap_client.create_tap_invoice(tap_request)
     generated_at = datetime.now(timezone.utc).isoformat()
 
     # ── 6. Persist to database ────────────────────────────────────────────────
     db.create_link(
         invoice_id=invoice_id,
         customer_id=qbo_customer_id,
-        tap_charge_id=charge.charge_id,
-        payment_url=charge.payment_url,
+        tap_charge_id=tap_invoice.id,
+        payment_url=tap_invoice.url,
         amount=total_amt,
         currency=currency,
         invoice_number=invoice_number,
@@ -256,7 +263,7 @@ def process_invoice(
     qbo_updated = False
     try:
         note = _build_private_note(
-            existing_note, charge.payment_url, charge.charge_id, generated_at
+            existing_note, tap_invoice.url, tap_invoice.id, generated_at
         )
         qbo_client.update_invoice_note(invoice_id, sync_token, note)
         db.mark_qbo_updated(invoice_id)
@@ -283,7 +290,8 @@ def process_invoice(
                 invoice_number=invoice_number,
                 amount=total_amt,
                 currency=currency,
-                payment_url=charge.payment_url,
+                payment_url=tap_invoice.url,
+                invoice_link=invoice_link,
             )
             if msg.sent:
                 db.mark_whatsapp_sent(
@@ -305,7 +313,7 @@ def process_invoice(
         "workflow_complete",
         extra={
             "invoice_id": invoice_id,
-            "tap_charge_id": charge.charge_id,
+            "tap_charge_id": tap_invoice.id,
             "qbo_updated": qbo_updated,
             "whatsapp_sent": wa_sent,
         },
@@ -317,8 +325,8 @@ def process_invoice(
         customer_name=customer.display_name,
         amount=total_amt,
         currency=currency,
-        tap_charge_id=charge.charge_id,
-        payment_url=charge.payment_url,
+        tap_charge_id=tap_invoice.id,
+        payment_url=tap_invoice.url,
         status="LINK_GENERATED",
         qbo_note_updated=qbo_updated,
         created_at=generated_at,
