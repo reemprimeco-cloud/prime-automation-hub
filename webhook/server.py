@@ -4,6 +4,7 @@ Endpoints:
   POST /webhook         — QBO change notifications (auto-processes Invoice Create)
   POST /webhook/tap     — Tap payment capture notifications
   GET  /payment/success — customer lands here after Tap payment
+  GET  /invoice/{id}/pdf — QBO invoice PDF proxy
   GET  /health          — liveness + config status
 """
 from __future__ import annotations
@@ -13,7 +14,7 @@ import os
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from db.payment_links import bootstrap_links_from_file, init_table as init_payment_links_table
 from logging_config import get_logger
@@ -230,6 +231,33 @@ async def payment_success() -> FileResponse:
     if not _PAYMENT_SUCCESS_PAGE.is_file():
         raise HTTPException(status_code=500, detail="Payment success page not found")
     return FileResponse(_PAYMENT_SUCCESS_PAGE, media_type="text/html; charset=utf-8")
+
+
+# ── Invoice PDF proxy ──────────────────────────────────────────────────────────
+
+@app.get("/invoice/{invoice_id}/pdf")
+async def get_invoice_pdf(invoice_id: str) -> Response:
+    """Serve QBO invoice PDF directly — no customer auth required."""
+    from config import get_settings
+    from qbo.client import QuickBooksClient, QBOError
+
+    try:
+        settings = get_settings()
+        qbo = QuickBooksClient(settings=settings)
+        pdf_bytes = qbo.get_invoice_pdf(invoice_id)
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'inline; filename="invoice-{invoice_id}.pdf"'
+            },
+        )
+    except QBOError as exc:
+        _LOG.error("invoice_pdf_error", extra={"invoice_id": invoice_id, "error": str(exc)})
+        raise HTTPException(status_code=404, detail="Invoice PDF not found")
+    except Exception as exc:
+        _LOG.error("invoice_pdf_error", extra={"invoice_id": invoice_id, "error": str(exc)})
+        raise HTTPException(status_code=500, detail="Failed to fetch invoice PDF")
 
 
 # ── health ────────────────────────────────────────────────────────────────────

@@ -6,7 +6,7 @@ Handles:
   * the minorversion query param and JSON Accept headers,
   * structured logging of every request, response, refresh, and error,
   * convenience methods for Company Info, Customers, Invoices, Preferences,
-    and invoice custom-field discovery.
+    invoice PDF download, and invoice custom-field discovery.
 """
 from __future__ import annotations
 
@@ -189,6 +189,39 @@ class QuickBooksClient:
         """
         data = self._request("GET", f"{self._base_path()}/invoice/{invoice_id}")
         return data.get("Invoice", data)
+
+    def get_invoice_pdf(self, invoice_id: str) -> bytes:
+        """Fetch invoice as PDF binary from QBO."""
+        self._ensure_access_token()
+        url = f"{self.settings.api_base_url}{self._base_path()}/invoice/{invoice_id}/pdf"
+        t0 = time.monotonic()
+        resp = self._session.get(
+            url,
+            headers={
+                "Authorization": f"Bearer {self.tokens.access_token}",
+                "Accept": "application/pdf",
+            },
+            params={"minorversion": self.settings.minor_version},
+            timeout=30,
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        if resp.status_code == 401:
+            self._refresh()
+            return self.get_invoice_pdf(invoice_id)
+        if resp.status_code >= 400:
+            raise QBOError(
+                f"QuickBooks PDF error {resp.status_code} for invoice {invoice_id}: {resp.text}"
+            )
+        _LOG.info(
+            "api_response",
+            extra={
+                "method": "GET",
+                "path": f"/invoice/{invoice_id}/pdf",
+                "status": resp.status_code,
+                "duration_ms": duration_ms,
+            },
+        )
+        return resp.content
 
     def update_invoice_note(
         self, invoice_id: str, sync_token: str, private_note: str

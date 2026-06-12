@@ -163,6 +163,37 @@ def test_payment_success_page(web_client):
     assert "Payment successful" in resp.text
 
 
+def test_invoice_pdf_endpoint_returns_pdf(web_client, monkeypatch):
+    pdf_bytes = b"%PDF-1.4 test"
+
+    class _FakeQBO:
+        def get_invoice_pdf(self, invoice_id: str) -> bytes:
+            assert invoice_id == "9258"
+            return pdf_bytes
+
+    monkeypatch.setattr("qbo.client.QuickBooksClient", lambda settings=None: _FakeQBO())
+
+    resp = web_client.get("/invoice/9258/pdf")
+    assert resp.status_code == 200
+    assert resp.content == pdf_bytes
+    assert resp.headers["content-type"] == "application/pdf"
+    assert 'filename="invoice-9258.pdf"' in resp.headers["content-disposition"]
+
+
+def test_invoice_pdf_endpoint_returns_404_on_qbo_error(web_client, monkeypatch):
+    from qbo.client import QBOError
+
+    class _FakeQBO:
+        def get_invoice_pdf(self, invoice_id: str) -> bytes:
+            raise QBOError("QuickBooks PDF error 404 for invoice missing: Not found")
+
+    monkeypatch.setattr("qbo.client.QuickBooksClient", lambda settings=None: _FakeQBO())
+
+    resp = web_client.get("/invoice/missing/pdf")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Invoice PDF not found"
+
+
 def test_tap_webhook_unknown_charge_after_startup(web_client, tmp_path, monkeypatch):
     db_path = str(tmp_path / "hub.db")
     monkeypatch.setenv("DATABASE_PATH", db_path)

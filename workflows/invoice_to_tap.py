@@ -206,7 +206,7 @@ def process_invoice(
     customer_ref    = invoice.get("CustomerRef") or {}
     qbo_customer_id = str(customer_ref.get("value", ""))
     customer_display_name = str(customer_ref.get("name", ""))
-    invoice_link = invoice.get("InvoiceLink", "")
+    invoice_link = f"https://prime-automation-hub.onrender.com/invoice/{invoice_id}/pdf"
 
     # ── 3. Fetch customer ─────────────────────────────────────────────────────
     customer = qbo_client.get_customer_by_id(qbo_customer_id)

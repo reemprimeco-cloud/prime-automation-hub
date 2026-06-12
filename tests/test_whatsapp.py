@@ -205,7 +205,7 @@ def test_workflow_sends_whatsapp_on_happy_path(monkeypatch):
     assert result.whatsapp_number == "+96565068000"
     wa.send_payment_link.assert_called_once()
     _, kwargs = wa.send_payment_link.call_args
-    assert kwargs["invoice_link"] == "https://connect.intuit.com/portal/app/invoice/view/42"
+    assert kwargs["invoice_link"] == "https://prime-automation-hub.onrender.com/invoice/42/pdf"
     assert kwargs["payment_url"] == "https://tap.test/invoice"
 
 

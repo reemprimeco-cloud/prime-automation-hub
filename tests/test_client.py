@@ -253,3 +253,52 @@ def test_create_payment_posts_linked_payment(monkeypatch):
     assert body["PaymentMethodRef"] == {"value": "1000000001"}
     assert body["DepositToAccountRef"] == {"value": "29"}
     assert "chg_test" in body["PrivateNote"]
+
+
+def test_get_invoice_pdf_fetches_binary(monkeypatch):
+    pdf_bytes = b"%PDF-1.4 fake invoice pdf"
+    monkeypatch.setattr(qbo_client, "load_tokens", lambda _p: _fresh_tokens())
+    client = qbo_client.QuickBooksClient(settings=_settings())
+    captured = {}
+
+    class _Resp:
+        status_code = 200
+
+        @property
+        def content(self):
+            return pdf_bytes
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["params"] = params
+        return _Resp()
+
+    monkeypatch.setattr(client._session, "get", fake_get)
+    result = client.get_invoice_pdf("9258")
+
+    assert result == pdf_bytes
+    assert captured["url"].endswith("/v3/company/123456789/invoice/9258/pdf")
+    assert captured["headers"]["Accept"] == "application/pdf"
+    assert captured["params"]["minorversion"] == "75"
+
+
+def test_get_invoice_pdf_raises_on_error(monkeypatch):
+    monkeypatch.setattr(qbo_client, "load_tokens", lambda _p: _fresh_tokens())
+    client = qbo_client.QuickBooksClient(settings=_settings())
+
+    class _Resp:
+        status_code = 404
+        text = "Not found"
+
+        @property
+        def content(self):
+            return b""
+
+    monkeypatch.setattr(client._session, "get", lambda *a, **k: _Resp())
+
+    import pytest
+    from qbo.client import QBOError
+
+    with pytest.raises(QBOError, match="PDF error 404"):
+        client.get_invoice_pdf("missing")
