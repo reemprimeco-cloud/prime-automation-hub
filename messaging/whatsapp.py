@@ -23,7 +23,7 @@ Admin tap notify (3 vars):
   {{2}} customer name
   {{3}} amount  e.g. "48.000 KWD"
 
-Admin bank notify (3 vars):
+Admin bank notify (3 vars) — prime_admin_bank_notify_2:
   {{1}} invoice number
   {{2}} customer name
   {{3}} amount  e.g. "48.000 KWD"
