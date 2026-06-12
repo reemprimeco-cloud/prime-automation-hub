@@ -11,3 +11,5 @@ logs/
 .netlify
 .tools/
 .venv/
+*.zip
+.DS_Store
