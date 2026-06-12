@@ -329,3 +329,11 @@ def get_by_charge_id(tap_charge_id: str) -> Optional[dict]:
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+def get_by_invoice_number(invoice_number: str) -> Optional[dict]:
+    """Return the payment link record for a QBO DocNumber, or None."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM payment_links WHERE invoice_number = ?", (invoice_number,)
+        ).fetchone()
+    return dict(row) if row else None
