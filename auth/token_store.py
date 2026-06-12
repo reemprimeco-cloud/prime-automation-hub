@@ -30,12 +30,13 @@ class TokenData:
         return time.time() >= (self.refresh_token_expires_at - leeway)
 
 
-def bootstrap_from_env(path: str) -> bool:
+def bootstrap_from_env(path: str, *, force: bool = False) -> bool:
     """Seed tokens.json from QBO_TOKENS_JSON environment variable.
 
     Call this once on server startup (before load_tokens). If QBO_TOKENS_JSON
-    is set and tokens.json doesn't exist yet, the env var content is decoded
-    and written to disk. Normal read/write then proceeds via the file.
+    is set and tokens.json doesn't exist yet (or force=True), the env var
+    content is decoded and written to disk. Normal read/write then proceeds
+    via the file.
 
     Returns True if the file was written, False otherwise.
     """
@@ -44,7 +45,7 @@ def bootstrap_from_env(path: str) -> bool:
     env_val = os.getenv("QBO_TOKENS_JSON", "").strip()
     if not env_val:
         return False
-    if os.path.exists(path):
+    if os.path.exists(path) and not force:
         return False   # file already there — don't overwrite
     try:
         padded = env_val + "=" * (4 - len(env_val) % 4) if len(env_val) % 4 != 0 else env_val

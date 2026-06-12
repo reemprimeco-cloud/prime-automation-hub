@@ -35,6 +35,13 @@ async def _startup() -> None:
     init_payment_links_table()
     init_db()
     bootstrap_links_from_file()
+    if os.getenv("QBO_TOKENS_JSON", "").strip():
+        from config import get_settings
+        from auth.token_store import bootstrap_from_env
+
+        settings = get_settings()
+        if bootstrap_from_env(settings.token_path, force=True):
+            _LOG.info("qbo_tokens_bootstrapped_from_env")
     _LOG.info("database_ready")
 
 
@@ -239,7 +246,7 @@ async def payment_success() -> FileResponse:
 async def get_invoice_pdf(invoice_id: str) -> Response:
     """Serve QBO invoice PDF directly — no customer auth required."""
     from config import get_settings
-    from qbo.client import QuickBooksClient, QBOError
+    from qbo.client import QuickBooksClient, NotAuthorizedError, QBOError
 
     try:
         settings = get_settings()
@@ -252,6 +259,9 @@ async def get_invoice_pdf(invoice_id: str) -> Response:
                 "Content-Disposition": f'inline; filename="invoice-{invoice_id}.pdf"'
             },
         )
+    except NotAuthorizedError as exc:
+        _LOG.error("invoice_pdf_auth_error", extra={"invoice_id": invoice_id, "error": str(exc)})
+        raise HTTPException(status_code=503, detail="QuickBooks authorization required")
     except QBOError as exc:
         _LOG.error("invoice_pdf_error", extra={"invoice_id": invoice_id, "error": str(exc)})
         raise HTTPException(status_code=404, detail="Invoice PDF not found")

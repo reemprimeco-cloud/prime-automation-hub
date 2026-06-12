@@ -62,8 +62,15 @@ class QuickBooksClient:
             "token_refresh_start",
             extra={"realm_id": self.tokens.realm_id},
         )
-        self.tokens = refresh_tokens(self.settings, self.tokens)
-        save_tokens(self.settings.token_path, self.tokens)
+        try:
+            self.tokens = refresh_tokens(self.settings, self.tokens)
+            save_tokens(self.settings.token_path, self.tokens)
+        except Exception as exc:
+            _LOG.error("token_refresh_failed", extra={"error": str(exc)})
+            raise NotAuthorizedError(
+                "QuickBooks token refresh failed. Re-run `python -m scripts.authorize` "
+                "and update QBO_TOKENS_JSON on Render."
+            ) from exc
         _LOG.info(
             "token_refresh_complete",
             extra={"realm_id": self.tokens.realm_id},
@@ -190,7 +197,7 @@ class QuickBooksClient:
         data = self._request("GET", f"{self._base_path()}/invoice/{invoice_id}")
         return data.get("Invoice", data)
 
-    def get_invoice_pdf(self, invoice_id: str) -> bytes:
+    def get_invoice_pdf(self, invoice_id: str, *, retry_on_401: bool = True) -> bytes:
         """Fetch invoice as PDF binary from QBO."""
         self._ensure_access_token()
         url = f"{self.settings.api_base_url}{self._base_path()}/invoice/{invoice_id}/pdf"
@@ -205,9 +212,13 @@ class QuickBooksClient:
             timeout=30,
         )
         duration_ms = int((time.monotonic() - t0) * 1000)
-        if resp.status_code == 401:
+        if resp.status_code == 401 and retry_on_401:
+            _LOG.warning(
+                "token_expired_retrying",
+                extra={"method": "GET", "path": f"/invoice/{invoice_id}/pdf", "duration_ms": duration_ms},
+            )
             self._refresh()
-            return self.get_invoice_pdf(invoice_id)
+            return self.get_invoice_pdf(invoice_id, retry_on_401=False)
         if resp.status_code >= 400:
             raise QBOError(
                 f"QuickBooks PDF error {resp.status_code} for invoice {invoice_id}: {resp.text}"

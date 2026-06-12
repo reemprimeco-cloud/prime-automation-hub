@@ -194,6 +194,20 @@ def test_invoice_pdf_endpoint_returns_404_on_qbo_error(web_client, monkeypatch):
     assert resp.json()["detail"] == "Invoice PDF not found"
 
 
+def test_invoice_pdf_endpoint_returns_503_on_auth_error(web_client, monkeypatch):
+    from qbo.client import NotAuthorizedError
+
+    class _FakeQBO:
+        def get_invoice_pdf(self, invoice_id: str) -> bytes:
+            raise NotAuthorizedError("QuickBooks token refresh failed")
+
+    monkeypatch.setattr("qbo.client.QuickBooksClient", lambda settings=None: _FakeQBO())
+
+    resp = web_client.get("/invoice/9286/pdf")
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "QuickBooks authorization required"
+
+
 def test_tap_webhook_unknown_charge_after_startup(web_client, tmp_path, monkeypatch):
     db_path = str(tmp_path / "hub.db")
     monkeypatch.setenv("DATABASE_PATH", db_path)
