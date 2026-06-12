@@ -188,6 +188,41 @@ class QuickBooksClient:
         data = self._request("POST", f"{self._base_path()}/payment", json_body=body)
         return data.get("Payment", data)
 
+    def create_bank_transfer_payment(
+        self,
+        *,
+        customer_id: str,
+        invoice_id: str,
+        amount: float,
+    ) -> dict[str, Any]:
+        """Create a QBO payment for a bank-transfer invoice (admin confirmed)."""
+        deposit_id = self.settings.qbo_deposit_account_id or "29"
+        body: dict[str, Any] = {
+            "TotalAmt": round(amount, 3),
+            "CustomerRef": {"value": customer_id},
+            "DepositToAccountRef": {"value": deposit_id},
+            "PrivateNote": "Paid via bank transfer (admin confirmed).",
+            "Line": [
+                {
+                    "Amount": round(amount, 3),
+                    "LinkedTxn": [{"TxnId": invoice_id, "TxnType": "Invoice"}],
+                }
+            ],
+        }
+        if self.settings.qbo_bank_payment_method_id:
+            body["PaymentMethodRef"] = {
+                "value": self.settings.qbo_bank_payment_method_id
+            }
+        data = self._request("POST", f"{self._base_path()}/payment", json_body=body)
+        return data.get("Payment", data)
+
+    def find_invoice_by_doc_number(self, doc_number: str) -> dict[str, Any] | None:
+        """Return the first QBO invoice matching DocNumber, or None."""
+        safe = str(doc_number).replace("'", "\\'")
+        data = self.query(f"SELECT * FROM Invoice WHERE DocNumber = '{safe}'")
+        invoices = (data.get("QueryResponse") or {}).get("Invoice") or []
+        return invoices[0] if invoices else None
+
     def get_invoice(self, invoice_id: str) -> dict[str, Any]:
         """Fetch a single invoice by QBO ID.
 

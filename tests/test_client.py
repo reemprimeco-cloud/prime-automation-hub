@@ -255,6 +255,35 @@ def test_create_payment_posts_linked_payment(monkeypatch):
     assert "chg_test" in body["PrivateNote"]
 
 
+def test_create_bank_transfer_payment_posts_linked_payment(monkeypatch):
+    payload = {"Payment": {"Id": "PAY-BANK", "TotalAmt": 160.0}}
+    client, captured = _make_client(monkeypatch, payload)
+
+    payment = client.create_bank_transfer_payment(
+        customer_id="99",
+        invoice_id="9303",
+        amount=160.0,
+    )
+
+    assert payment["Id"] == "PAY-BANK"
+    body = captured.get("json") or {}
+    assert body["DepositToAccountRef"] == {"value": "29"}
+    assert "bank transfer" in body["PrivateNote"].lower()
+    assert "PaymentMethodRef" not in body
+
+
+def test_find_invoice_by_doc_number_returns_first_match(monkeypatch):
+    payload = {
+        "QueryResponse": {
+            "Invoice": [{"Id": "9303", "DocNumber": "2537", "Balance": 160.0}]
+        }
+    }
+    client, captured = _make_client(monkeypatch, payload)
+    invoice = client.find_invoice_by_doc_number("2537")
+    assert invoice["Id"] == "9303"
+    assert "2537" in captured["params"]["query"]
+
+
 def test_get_invoice_pdf_fetches_binary(monkeypatch):
     pdf_bytes = b"%PDF-1.4 fake invoice pdf"
     monkeypatch.setattr(qbo_client, "load_tokens", lambda _p: _fresh_tokens())

@@ -240,6 +240,43 @@ class TestProcessInvoice:
         assert "bank transfer" in result.detail.lower()
         tap.create_tap_invoice.assert_not_called()
 
+    def test_bank_transfer_sends_whatsapp_with_bank_info(self, monkeypatch):
+        from qbo.models import Customer
+        from messaging.whatsapp import MessageResult
+
+        qbo, tap = _make_workflow_mocks(monkeypatch)
+        qbo.get_customer_by_id.return_value = Customer(
+            id="99", display_name="Ahmed Al-Rashid",
+            email="ahmed@example.com",
+            phone="+96524001234",
+            mobile="+96565068000",
+            alternate_phone="",
+            notes="BANK_TRANSFER",
+        )
+        wa = MagicMock()
+        wa.send_payment_link.return_value = MessageResult(
+            to="+96565068000", sid="SM_bank", status="queued"
+        )
+        from dataclasses import replace
+
+        settings = replace(
+            _settings(),
+            bank_transfer_info="NBK | Account: 2019015492 | IBAN: KW70NBOK0000000000002019015492",
+        )
+        result = process_invoice(
+            "42", qbo_client=qbo, tap_client=tap, whatsapp_client=wa, settings=settings
+        )
+        assert isinstance(result, SkipResult)
+        assert result.reason == "BANK_TRANSFER"
+        tap.create_tap_invoice.assert_not_called()
+        wa.send_payment_link.assert_called_once()
+        wa.send_admin_bank_notify.assert_called_once_with(
+            "1089", "Ahmed Al-Rashid", 250.0, "KWD"
+        )
+        _, kwargs = wa.send_payment_link.call_args
+        assert "NBK" in kwargs["payment_url"]
+        assert kwargs["invoice_link"] == "https://prime-automation-hub.onrender.com/invoice/42/pdf"
+
     def test_bank_transfer_match_is_case_insensitive(self, monkeypatch):
         from qbo.models import Customer
 

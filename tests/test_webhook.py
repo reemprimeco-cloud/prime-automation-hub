@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -206,6 +207,54 @@ def test_invoice_pdf_endpoint_returns_503_on_auth_error(web_client, monkeypatch)
     resp = web_client.get("/invoice/9286/pdf")
     assert resp.status_code == 503
     assert resp.json()["detail"] == "QuickBooks authorization required"
+
+
+def test_whatsapp_webhook_rejects_non_admin(web_client, monkeypatch):
+    monkeypatch.setenv("TWILIO_ADMIN_PHONE", "+96550655856")
+    resp = web_client.post(
+        "/webhook/whatsapp",
+        content="From=whatsapp%3A%2B96599999999&Body=PAID_2537",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert resp.status_code == 403
+
+
+def test_whatsapp_webhook_handles_paid_action(web_client, monkeypatch):
+    monkeypatch.setenv("TWILIO_ADMIN_PHONE", "+96550655856")
+
+    class _FakeQBO:
+        def find_invoice_by_doc_number(self, doc_number):
+            return {
+                "Id": "42", "DocNumber": doc_number,
+                "TotalAmt": 160.0, "Balance": 160.0,
+                "CustomerRef": {"value": "99", "name": "Coded"},
+            }
+
+        def create_bank_transfer_payment(self, **kwargs):
+            return {"Id": "PAY-99"}
+
+    class _FakeWA:
+        def send_text(self, to_number, body):
+            return MagicMock(sent=True, sid="SM_reply")
+
+    monkeypatch.setattr("qbo.client.QuickBooksClient", lambda settings=None: _FakeQBO())
+    monkeypatch.setattr(
+        "messaging.whatsapp.whatsapp_client_from_settings",
+        lambda settings=None: _FakeWA(),
+    )
+    monkeypatch.setattr("db.payment_links.get_by_invoice_id", lambda _: None)
+    monkeypatch.setattr("db.payment_links.mark_payment_captured", lambda *a, **k: None)
+
+    resp = web_client.post(
+        "/webhook/whatsapp",
+        content="From=whatsapp%3A%2B96550655856&Body=PAID_2537",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["action"] == "PAID"
+    assert "PAY-99" in body["reply"]
 
 
 def test_tap_webhook_unknown_charge_after_startup(web_client, tmp_path, monkeypatch):

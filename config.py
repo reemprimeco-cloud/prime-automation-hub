@@ -48,6 +48,11 @@ class Settings:
     twilio_content_sid: str = ""     # HX... payment link template SID
     twilio_confirmation_content_sid: str = ""  # HX... payment confirmation template SID
     qbo_deposit_account_id: str | None = None  # bank / undeposited funds account
+    bank_transfer_info: str = ""  # shown in WhatsApp for BANK_TRANSFER customers
+    twilio_admin_tap_sid: str = ""
+    twilio_admin_bank_sid: str = ""
+    twilio_admin_phone: str = ""
+    qbo_bank_payment_method_id: str | None = None
 
     @property
     def api_base_url(self) -> str:
@@ -90,4 +95,11 @@ def get_settings() -> Settings:
         twilio_content_sid=os.getenv("TWILIO_CONTENT_SID", "").strip(),
         twilio_confirmation_content_sid=os.getenv("TWILIO_CONFIRMATION_CONTENT_SID", "").strip(),
         qbo_deposit_account_id=(os.getenv("QBO_DEPOSIT_ACCOUNT_ID", "").strip() or None),
+        bank_transfer_info=os.getenv("BANK_TRANSFER_INFO", "").strip(),
+        twilio_admin_tap_sid=os.getenv("TWILIO_ADMIN_TAP_SID", "").strip(),
+        twilio_admin_bank_sid=os.getenv("TWILIO_ADMIN_BANK_SID", "").strip(),
+        twilio_admin_phone=os.getenv("TWILIO_ADMIN_PHONE", "").strip(),
+        qbo_bank_payment_method_id=(
+            os.getenv("QBO_BANK_PAYMENT_METHOD_ID", "").strip() or None
+        ),
     )

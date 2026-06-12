@@ -5,6 +5,7 @@ Endpoints:
   POST /webhook/tap     — Tap payment capture notifications
   GET  /payment/success — customer lands here after Tap payment
   GET  /invoice/{id}/pdf — QBO invoice PDF proxy
+  POST /webhook/whatsapp — inbound admin WhatsApp button actions
   GET  /health          — liveness + config status
 """
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from urllib.parse import parse_qs
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import FileResponse, Response
@@ -268,6 +270,70 @@ async def get_invoice_pdf(invoice_id: str) -> Response:
     except Exception as exc:
         _LOG.error("invoice_pdf_error", extra={"invoice_id": invoice_id, "error": str(exc)})
         raise HTTPException(status_code=500, detail="Failed to fetch invoice PDF")
+
+
+# ── inbound WhatsApp (admin buttons) ───────────────────────────────────────────
+
+@app.post("/webhook/whatsapp", status_code=status.HTTP_200_OK)
+async def receive_whatsapp_webhook(request: Request) -> dict:
+    """Handle inbound WhatsApp messages from the admin (button taps)."""
+    from config import get_settings
+    from messaging.whatsapp import whatsapp_client_from_settings
+    from qbo.client import QuickBooksClient
+    from workflows.admin_whatsapp import (
+        handle_admin_action,
+        normalize_whatsapp_number,
+        parse_button_payload,
+    )
+
+    form_bytes = await request.body()
+    form = {
+        key: values[0]
+        for key, values in parse_qs(form_bytes.decode("utf-8")).items()
+        if values
+    }
+    sender = normalize_whatsapp_number(str(form.get("From", "")))
+    body = str(form.get("Body", ""))
+    button_payload = str(form.get("ButtonPayload", "") or form.get("ButtonText", ""))
+
+    settings = get_settings()
+    admin_phone = normalize_whatsapp_number(settings.twilio_admin_phone)
+    if not admin_phone:
+        raise HTTPException(status_code=500, detail="TWILIO_ADMIN_PHONE not set")
+    if sender != admin_phone:
+        _LOG.warning("whatsapp_inbound_rejected", extra={"from": sender})
+        raise HTTPException(status_code=403, detail="Unauthorized sender")
+
+    parsed = parse_button_payload(body, button_payload)
+    if parsed is None:
+        _LOG.info("whatsapp_inbound_ignored", extra={"body": body[:80]})
+        return {"status": "ignored", "detail": "No recognized button action"}
+
+    action, doc_number = parsed
+    _LOG.info(
+        "whatsapp_admin_action",
+        extra={"action": action, "doc_number": doc_number, "from": sender},
+    )
+
+    whatsapp = whatsapp_client_from_settings(settings)
+    qbo = QuickBooksClient(settings=settings)
+    result = handle_admin_action(
+        action,
+        doc_number,
+        qbo_client=qbo,
+        whatsapp_client=whatsapp,
+        settings=settings,
+    )
+
+    if whatsapp is not None:
+        whatsapp.send_text(admin_phone, result.reply)
+
+    return {
+        "status": "ok" if result.ok else "error",
+        "action": action,
+        "doc_number": doc_number,
+        "reply": result.reply,
+    }
 
 
 # ── health ────────────────────────────────────────────────────────────────────

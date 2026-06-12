@@ -213,6 +213,33 @@ def process_invoice(
 
     if "BANK_TRANSFER" in (customer.notes or "").upper():
         _LOG.info("workflow_skipped_bank_transfer", extra={"invoice_id": invoice_id})
+        bank_info = (settings.bank_transfer_info or "").strip()
+        if whatsapp_client is not None and bank_info:
+            phone = _phone_for_tap(customer)
+            if phone.number:
+                wa_number = f"+{phone.country_code}{phone.number}"
+                msg = whatsapp_client.send_payment_link(
+                    wa_number,
+                    customer_name=customer.display_name,
+                    invoice_number=invoice_number,
+                    amount=total_amt,
+                    currency=currency,
+                    payment_url=bank_info,
+                    invoice_link=invoice_link,
+                )
+                if msg.sent:
+                    _LOG.info(
+                        "bank_transfer_whatsapp_sent",
+                        extra={"invoice_id": invoice_id, "to": wa_number},
+                    )
+                    whatsapp_client.send_admin_bank_notify(
+                        invoice_number, customer.display_name, total_amt, currency
+                    )
+                else:
+                    _LOG.warning(
+                        "bank_transfer_whatsapp_failed",
+                        extra={"invoice_id": invoice_id, "error": msg.error},
+                    )
         return SkipResult(
             invoice_id=invoice_id,
             reason="BANK_TRANSFER",
@@ -299,6 +326,9 @@ def process_invoice(
                 )
                 wa_sent = True
                 wa_sid = msg.sid
+                whatsapp_client.send_admin_tap_notify(
+                    invoice_number, customer.display_name, total_amt, currency
+                )
             else:
                 db.mark_whatsapp_failed(invoice_id, error=msg.error)
         else:

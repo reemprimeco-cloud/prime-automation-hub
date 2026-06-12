@@ -17,6 +17,16 @@ Payment confirmation (3 vars):
   {{1}} customer first name
   {{2}} invoice number
   {{3}} amount  e.g. "48.000 KWD"
+
+Admin tap notify (3 vars):
+  {{1}} invoice number
+  {{2}} customer name
+  {{3}} amount  e.g. "48.000 KWD"
+
+Admin bank notify (3 vars):
+  {{1}} invoice number
+  {{2}} customer name
+  {{3}} amount  e.g. "48.000 KWD"
 """
 from __future__ import annotations
 
@@ -50,6 +60,9 @@ class WhatsAppClient:
         from_number: str,
         content_sid: str,
         confirmation_content_sid: str = "",
+        admin_tap_sid: str = "",
+        admin_bank_sid: str = "",
+        admin_phone: str = "",
     ) -> None:
         if not all([account_sid, auth_token, from_number, content_sid]):
             raise ValueError(
@@ -60,6 +73,9 @@ class WhatsAppClient:
         self._from = f"whatsapp:{from_number}"
         self._content_sid = content_sid
         self._confirmation_content_sid = confirmation_content_sid or content_sid
+        self._admin_tap_sid = admin_tap_sid
+        self._admin_bank_sid = admin_bank_sid
+        self._admin_phone = admin_phone
 
     # ── payment link ──────────────────────────────────────────────────────────
 
@@ -111,6 +127,63 @@ class WhatsAppClient:
         )
         return self._send(to_number, self._confirmation_content_sid, variables)
 
+    # ── admin notifications ───────────────────────────────────────────────────
+
+    def send_admin_tap_notify(
+        self,
+        invoice_number: str,
+        customer_name: str,
+        amount: float,
+        currency: str = "KWD",
+    ) -> MessageResult:
+        """Notify admin of a new Tap invoice WhatsApp sent to a customer."""
+        if not self._admin_phone or not self._admin_tap_sid:
+            return MessageResult(to=self._admin_phone or "", error="admin tap not configured")
+        variables = {
+            "1": invoice_number,
+            "2": customer_name,
+            "3": f"{float(amount):.3f} {currency}",
+        }
+        _LOG.info(
+            "whatsapp_admin_tap_notify_attempt",
+            extra={"invoice": invoice_number, "customer": customer_name},
+        )
+        return self._send(self._admin_phone, self._admin_tap_sid, variables)
+
+    def send_admin_bank_notify(
+        self,
+        invoice_number: str,
+        customer_name: str,
+        amount: float,
+        currency: str = "KWD",
+    ) -> MessageResult:
+        """Notify admin of a bank-transfer invoice WhatsApp sent to a customer."""
+        if not self._admin_phone or not self._admin_bank_sid:
+            return MessageResult(
+                to=self._admin_phone or "", error="admin bank not configured"
+            )
+        variables = {
+            "1": invoice_number,
+            "2": customer_name,
+            "3": f"{float(amount):.3f} {currency}",
+        }
+        _LOG.info(
+            "whatsapp_admin_bank_notify_attempt",
+            extra={"invoice": invoice_number, "customer": customer_name},
+        )
+        return self._send(self._admin_phone, self._admin_bank_sid, variables)
+
+    def send_text(self, to_number: str, body: str) -> MessageResult:
+        """Send a plain-text WhatsApp message (admin replies)."""
+        to = f"whatsapp:{to_number}"
+        try:
+            msg = self._client.messages.create(from_=self._from, to=to, body=body)
+            _LOG.info("whatsapp_text_sent", extra={"sid": msg.sid, "to": to_number})
+            return MessageResult(to=to_number, sid=msg.sid, status=msg.status)
+        except Exception as exc:
+            _LOG.error("whatsapp_text_failed", extra={"to": to_number, "error": str(exc)})
+            return MessageResult(to=to_number, error=str(exc))
+
     # ── internal ──────────────────────────────────────────────────────────────
 
     def _send(
@@ -153,4 +226,7 @@ def whatsapp_client_from_settings(settings) -> WhatsAppClient | None:
         from_number=settings.twilio_whatsapp_from,
         content_sid=settings.twilio_content_sid,
         confirmation_content_sid=settings.twilio_confirmation_content_sid,
+        admin_tap_sid=settings.twilio_admin_tap_sid,
+        admin_bank_sid=settings.twilio_admin_bank_sid,
+        admin_phone=settings.twilio_admin_phone,
     )

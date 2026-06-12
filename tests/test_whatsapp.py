@@ -204,6 +204,7 @@ def test_workflow_sends_whatsapp_on_happy_path(monkeypatch):
     assert result.whatsapp_sent is True
     assert result.whatsapp_number == "+96565068000"
     wa.send_payment_link.assert_called_once()
+    wa.send_admin_tap_notify.assert_called_once_with("1089", "Dar Haa", 48.0, "KWD")
     _, kwargs = wa.send_payment_link.call_args
     assert kwargs["invoice_link"] == "https://prime-automation-hub.onrender.com/invoice/42/pdf"
     assert kwargs["payment_url"] == "https://tap.test/invoice"
@@ -304,3 +305,42 @@ def test_workflow_does_not_fail_when_whatsapp_errors(monkeypatch):
     assert isinstance(result, LinkResult)
     assert result.whatsapp_sent is False
     assert result.tap_charge_id == "inv_x"   # payment link still valid
+
+
+def test_send_admin_tap_notify_uses_admin_template():
+    import json
+    from unittest.mock import patch
+    with patch("twilio.rest.Client") as MockClient:
+        mock_instance = MockClient.return_value
+        mock_instance.messages.create.return_value = MagicMock(sid="SM_admin", status="queued")
+        client = WhatsAppClient(
+            "AC", "auth", "+96565000000", "HXtest",
+            admin_tap_sid="HXadmin_tap", admin_phone="+96550655856",
+        )
+        result = client.send_admin_tap_notify("2537", "Coded", 160.0)
+        assert result.sent is True
+        kwargs = mock_instance.messages.create.call_args.kwargs
+        assert kwargs["content_sid"] == "HXadmin_tap"
+        assert kwargs["to"] == "whatsapp:+96550655856"
+        variables = json.loads(kwargs["content_variables"])
+        assert variables["1"] == "2537"
+        assert variables["2"] == "Coded"
+        assert "160.000 KWD" in variables["3"]
+
+
+def test_send_admin_bank_notify_uses_bank_template():
+    import json
+    from unittest.mock import MagicMock, patch
+    with patch("twilio.rest.Client") as MockClient:
+        mock_instance = MockClient.return_value
+        mock_instance.messages.create.return_value = MagicMock(sid="SM_admin", status="queued")
+        client = WhatsAppClient(
+            "AC", "auth", "+96565000000", "HXtest",
+            admin_bank_sid="HXadmin_bank", admin_phone="+96550655856",
+        )
+        result = client.send_admin_bank_notify("2537", "Coded", 160.0)
+        assert result.sent is True
+        kwargs = mock_instance.messages.create.call_args.kwargs
+        assert kwargs["content_sid"] == "HXadmin_bank"
+        variables = json.loads(kwargs["content_variables"])
+        assert variables["1"] == "2537"
