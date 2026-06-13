@@ -149,6 +149,7 @@ class TapClient:
             "order": {
                 "amount": round(req.amount, 3),
                 "currency": req.currency,
+                "items": [{"name": req.description, "amount": round(req.amount, 3), "currency": req.currency, "quantity": 1}]  
             },
             "redirect": {"url": req.redirect_url},
             "post": {"url": req.webhook_url},
