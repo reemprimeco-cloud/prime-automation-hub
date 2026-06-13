@@ -87,8 +87,14 @@ def _process_qbo_invoice(invoice_id: str) -> None:
                           "status": result.status,
                       })
     except Exception as exc:
-        _LOG.error("qbo_invoice_process_error",
-                   extra={"invoice_id": invoice_id, "error": str(exc)})
+        _LOG.error(
+            "qbo_invoice_process_error",
+            extra={
+                "invoice_id": invoice_id,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            },
+        )
 
 
 # ── QBO webhook ───────────────────────────────────────────────────────────────

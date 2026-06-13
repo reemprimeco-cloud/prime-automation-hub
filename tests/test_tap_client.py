@@ -123,6 +123,15 @@ class TestBuildInvoiceBody:
         body = TapClient._build_invoice_body(_make_request())
         assert body["metadata"]["qbo_invoice_id"] == "42"
 
+    def test_order_includes_line_item(self):
+        req = _make_request()
+        body = TapClient._build_invoice_body(req)
+        items = body["order"]["items"]
+        assert len(items) == 1
+        assert items[0]["amount"] == 250.000
+        assert items[0]["quantity"] == 1
+        assert items[0]["name"]
+
 
 # ── charge request body construction ──────────────────────────────────────────
 
