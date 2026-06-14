@@ -67,12 +67,48 @@ def handle_payment_capture(
     # ── 1. Look up the payment link record ────────────────────────────────────
     record = db.get_by_charge_id(tap_charge_id)
     if record is None:
-        _LOG.warning("capture_charge_not_found", extra={"tap_charge_id": tap_charge_id})
-        return CaptureError(
-            tap_charge_id=tap_charge_id,
-            reason="CHARGE_NOT_FOUND",
-            detail="No payment_link record found for this charge ID.",
-        )
+        # DB may have been wiped — try to recover from Tap charge metadata
+        _LOG.warning("capture_charge_not_found_in_db", extra={"tap_charge_id": tap_charge_id})
+        try:
+            from tap.client import tap_client_from_settings
+            from config import get_settings
+            settings = get_settings()
+            tap = tap_client_from_settings(settings)
+            if tap_charge_id.startswith("inv_"):
+                charge_data = tap.get_tap_invoice(tap_charge_id)
+            else:
+                charge_data = tap.get_charge(tap_charge_id)
+            metadata = charge_data.get("metadata") or {}
+            invoice_id_meta = metadata.get("qbo_invoice_id", "")
+            invoice_number_meta = metadata.get("invoice_number", "")
+            customer_id_meta = metadata.get("qbo_customer_id", "")
+            if not invoice_id_meta:
+                _LOG.warning("capture_no_metadata", extra={"tap_charge_id": tap_charge_id})
+                return CaptureError(
+                    tap_charge_id=tap_charge_id,
+                    reason="CHARGE_NOT_FOUND",
+                    detail="No payment_link record or metadata found for this charge ID.",
+                )
+            record = {
+                "invoice_id": invoice_id_meta,
+                "invoice_number": invoice_number_meta,
+                "customer_id": customer_id_meta,
+                "customer_name": "",
+                "amount": amount,
+                "currency": currency,
+                "status": None,
+                "whatsapp_to_number": "",
+                "qbo_payment_id": "",
+                "whatsapp_sent": False,
+            }
+            _LOG.info("capture_recovered_from_tap", extra={"invoice_id": invoice_id_meta})
+        except Exception as exc:
+            _LOG.error("capture_tap_lookup_failed", extra={"tap_charge_id": tap_charge_id, "error": str(exc)})
+            return CaptureError(
+                tap_charge_id=tap_charge_id,
+                reason="CHARGE_NOT_FOUND",
+                detail=str(exc),
+            )
 
     invoice_id     = record["invoice_id"]
     customer_id    = record["customer_id"]
