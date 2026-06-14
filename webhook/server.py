@@ -44,6 +44,11 @@ async def _startup() -> None:
         settings = get_settings()
         if bootstrap_from_env(settings.token_path, force=True):
             _LOG.info("qbo_tokens_bootstrapped_from_env")
+        else:
+            _LOG.error(
+                "qbo_tokens_bootstrap_skipped",
+                extra={"token_path": settings.token_path},
+            )
     _LOG.info("database_ready")
 
 

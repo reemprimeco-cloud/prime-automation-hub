@@ -1,192 +1,207 @@
-"""Admin WhatsApp inbound action handler.
-
-Parses button payloads from the admin's WhatsApp and dispatches:
-  PAID_XXXX    — mark invoice paid via bank transfer in QBO
-  RESEND_XXXX  — resend payment link WhatsApp to customer
-  STATUS_XXXX  — reply with current invoice status
-"""
+"""Admin WhatsApp inbound button actions (PAID / RESEND / STATUS)."""
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 
+from db import payment_links as db
 from logging_config import get_logger
+from qbo.client import QBOError, QuickBooksClient
+from workflows.invoice_to_tap import _phone_for_tap
 
-_LOG = get_logger("workflows.admin_whatsapp")
+_LOG = get_logger("workflow.admin_whatsapp")
 
-_BUTTON_RE = re.compile(r"^(PAID|RESEND|STATUS)[_\-](\S+)$", re.IGNORECASE)
+BUTTON_RE = re.compile(r"^(PAID|RESEND|STATUS)_(.+)$")
 
 
 @dataclass
-class ActionResult:
-    ok: bool
+class AdminActionResult:
     reply: str
+    ok: bool = True
 
 
-def normalize_whatsapp_number(raw: str) -> str:
-    return raw.replace("whatsapp:", "").strip()
+def normalize_whatsapp_number(number: str) -> str:
+    """Normalize Twilio WhatsApp address to E.164 (+965...)."""
+    cleaned = (number or "").replace("whatsapp:", "").strip()
+    if cleaned and not cleaned.startswith("+"):
+        cleaned = f"+{cleaned.lstrip('+')}"
+    return cleaned
 
 
-def parse_button_payload(body: str, button_payload: str) -> tuple[str, str] | None:
-    for candidate in [button_payload, body]:
-        candidate = candidate.strip()
-        m = _BUTTON_RE.match(candidate)
-        if m:
-            return m.group(1).upper(), m.group(2)
-    reone
+def parse_button_payload(body: str, button_payload: str = "") -> tuple[str, str] | None:
+    """Parse PAID_XXXX / RESEND_XXXX / STATUS_XXXX from inbound message."""
+    for candidate in (button_payload, body):
+        text = (candidate or "").strip()
+        if not text:
+            continue
+        match = BUTTON_RE.match(text)
+        if match:
+            return match.group(1), match.group(2)
+    return None
+
+
+def _hub_invoice_pdf_url(invoice_id: str) -> str:
+    return f"https://prime-automation-hub.onrender.com/invoice/{invoice_id}/pdf"
+
+
+def _payment_url_for_invoice(invoice: dict, record: dict | None) -> str:
+    if record and record.get("payment_url"):
+        return record["payment_url"]
+    note = invoice.get("PrivateNote") or ""
+    match = re.search(r"Payment Link:\n(https://[^\n]+)", note)
+    return match.group(1) if match else ""
+
+
+def resend_customer_whatsapp(
+    invoice: dict,
+    *,
+    qbo_client: QuickBooksClient,
+    whatsapp_client,
+    settings,
+) -> bool:
+    """Resend the customer payment/bank-transfer WhatsApp for an invoice."""
+    invoice_id = str(invoice.get("Id", ""))
+    invoice_number = str(invoice.get("DocNumber", invoice_id))
+    amount = float(invoice.get("TotalAmt", 0))
+    balance = float(invoice.get("Balance", 0))
+    if balance <= 0:
+        return False
+
+    cref = invoice.get("CustomerRef") or {}
+    customer = qbo_client.get_customer_by_id(str(cref.get("value", "")))
+    phone = _phone_for_tap(customer)
+    if not phone.number:
+        return False
+
+    wa_number = f"+{phone.country_code}{phone.number}"
+    invoice_link = _hub_invoice_pdf_url(invoice_id)
+    is_bank = "BANK_TRANSFER" in (customer.notes or "").upper()
+
+    if is_bank:
+        bank_info = (settings.bank_transfer_info or "").strip()
+        if not bank_info:
+            return False
+        msg = whatsapp_client.send_payment_link(
+            wa_number,
+            customer_name=customer.display_name,
+            invoice_number=invoice_number,
+            amount=amount,
+            payment_url=bank_info,
+            invoice_link=invoice_link,
+        )
+    else:
+        record = db.get_by_invoice_id(invoice_id)
+        payment_url = _payment_url_for_invoice(invoice, record)
+        if not payment_url:
+            return False
+        msg = whatsapp_client.send_payment_link(
+            wa_number,
+            customer_name=customer.display_name,
+            invoice_number=invoice_number,
+            amount=amount,
+            payment_url=payment_url,
+            invoice_link=invoice_link,
+        )
+
+    if msg.sent:
+        db.mark_whatsapp_sent(invoice_id, message_sid=msg.sid, to_number=wa_number)
+    return msg.sent
 
 
 def handle_admin_action(
     action: str,
     doc_number: str,
     *,
-    qbo_client,
+    qbo_client: QuickBooksClient,
     whatsapp_client,
     settings,
-) -> ActionResult:
-    try:
-        if action == "PAID":
-            return _handle_paid(doc_number, qbo_client=qbo_client, settings=settings)
-        elif action == "RESEND":
-            return _handle_resend(
-                doc_number,
-                qbo_client=qbo_client,
-                whatsapp_client=whatsapp_client,
-                settings=settings,
-            )
-        elif action == "STATUS":
-            return _handle_status(doc_number, qbo_client=qbo_client)
-        else:
-            return ActionResult(ok=False, reply=f"Unknown action: {action}")
-    except Exception as exc:
-        _LOG.error("admin_action_error",
-                   extra={"action": action, "doc_number": doc_number, "error": str(exc)})
-        return ActionResult(ok=False, reply=f"Error processing {action}_{doc_number}: {exc}")
-
-
-def _handle_paid(doc_number: str, *, qbo_client, settings) -> ActionResult:
-    from db import payment_links as db
-    from workflows.payment_capture import handle_payment_capture, CaptureResult, CaptureError
-
-    row = db.get_by_invoice_number(doc_number)
-    if row:
-        invoice_id = row["invoice_id"]
-        amount = row["amount"]
-        currency = row.get("currency", "KWD")
-    else:
-        invoice = _find_invoice_by_doc_number(doc_number, qbo_client)
-        if invoice is None:
-            return ActionResult(ok=False, reply=f"Invoice #{doc_number} not found.")
-        invoice_id = str(invoice.get("Id", ""))
-        amount = float(invoice.get("TotalAmt", 0))
-        currency = "KWD"
-
-    result = handle_payment_capture(
-        invoice_id, amount, currency,
-        qbo_client=qbo_client,
-        whatsapp_client=None,
-        tap_payment_ref=f"BANK-{doc_number}",
-    )
-
-    if isinstance(result, CaptureError):
-        if result.reason == "ALREADY_PAID":
-            return ActionResult(ok=True, reply=f"Invoice #{doc_number} was already paid ✓")
-        return Actionsult(ok=False, reply=f"Failed to mark #{doc_number} paid: {result.detail}")
-
-    return ActionResult(
-        ok=True,
-        reply=f"✅ Invoice #{doc_number} marked PAID\nAmount: {amount:.3f} {currency}\nQBO Payment ID: {result.qbo_payment_id}",
-    )
-
-
-def _handle_resend(doc_number: str, *, qbo_client, whatsapp_client, settings) -> ActionResult:
-    from db import payment_links as db
-    from qbo.phone import is_kuwait_mobile, normalize
-
-    if whatsapp_client is None:
-        return ActionResult(ok=False, reply="WhatsApp not configured.")
-
-    row = db.get_by_invoice_number(doc_number)
-    if row is None:
-        return ActionResult(ok=False, reply=f"Invoice #{doc_number} not found in DB.")
-
-    invoice_id = row["invoice_id"]
-    payment_url = row["payment_url"]
-    amount = row["amount"]
-    currency = row.get("currency", "KWD")
-    customer_name = row.get("customer_name", "")
-
-    invoice = qbo_client.get_invoice(invoice_id)
-    customer_ref = invoice.get("CustomerRef") or {}
-    customer_id = str(cuomer_ref.get("value", ""))
-    customer = qbo_client.get_customer_by_id(customer_id)
-
-    wa_number = ""
-    for raw in [customer.mobile, customer.phone, customer.alternate_phone]:
-        norm = normalize(raw)
-        if norm and is_kuwait_mobile(norm):
-            wa_number = f"+965{norm[4:]}"
-            break
-
-    if not wa_number:
-        return ActionResult(ok=False, reply=f"No Kuwait mobile found for invoice #{doc_number}.")
-
-    invoice_link = f"https://prime-automation-hub.onrender.com/invoice/{invoice_id}/pdf"
-    msg = whatsapp_client.send_payment_link(
-        wa_number,
-        customer_name=customer_name,
-        invoice_number=doc_number,
-        amount=amount,
-        currency=currency,
-        payment_url=payment_url,
-        invoice_link=invoice_link,
-    )
-
-    if msg.sent:
-        return ActionResult(ok=True, reply=f"✅ Payment link resent to {wa_number} for invoice #{doc_number}")
-    return ActionResult(ok=False, reply=f"Failed to resend: {msg.error}")
-
-
-def _handle_status(doc_number:tr, *, qbo_client) -> ActionResult:
-    from db import payment_links as db
-
-    row = db.get_by_invoice_number(doc_number)
-    if row is None:
-        invoice = _find_invoice_by_doc_number(doc_number, qbo_client)
-        if invoice is None:
-            return ActionResult(ok=False, reply=f"Invoice #{doc_number} not found.")
-        balance = float(invoice.get("Balance", 0))
-        total = float(invoice.get("TotalAmt", 0))
-        status_str = "PAID ✅" if balance <= 0 else "UNPAID ⏳"
-        return ActionResult(ok=True, reply=f"Invoice #{doc_number}\nTotal: {total:.3f} KWD\nBalance: {balance:.3f} KWD\nStatus: {status_str}")
-
-    invoice_id = row["invoice_id"]
-    invoice = qbo_client.get_invoice(invoice_id)
-    balance = float(invoice.get("Balance", 0))
-    total = float(invoice.get("TotalAmt", 0))
-    status_str = "PAID ✅" if balance <= 0 else "UNPAID ⏳"
-    payment_url = row.get("payment_url", "")
-
-    lines = [
-        f"Invoice #{doc_number}",
-        f"Total: {total:.3f} KWD",
-        f"Balancece:.3f} KWD",
-        f"Status: {status_str}",
-    ]
-    if balance > 0 and payment_url:
-        lines.append(f"Pay: {payment_url}")
-
-    return ActionResult(ok=True, reply="\n".join(lines))
-
-
-def _find_invoice_by_doc_number(doc_number: str, qbo_client) -> dict | None:
-    try:
-        results = qbo_client.query(
-            f"SELECT * FROM Invoice WHERE DocNumber = '{doc_number}' MAXRESULTS 1"
+) -> AdminActionResult:
+    """Execute an admin button action and return a reply for the admin."""
+    invoice = qbo_client.find_invoice_by_doc_number(doc_number)
+    if invoice is None:
+        return AdminActionResult(
+            reply=f"Invoice #{doc_number} not found in QuickBooks.",
+            ok=False,
         )
-        invoices = results.get("QueryResponse", {}).get("Invoice", [])
-        return invoices[0] if invoices else None
-    except Exception as exc:
-        _LOG.error("qbo_invoice_search_error",
-                   extra={"doc_number": doc_number, "error": str(exc)})
-        return None
+
+    invoice_id = str(invoice.get("Id", ""))
+    customer_ref = invoice.get("CustomerRef") or {}
+    customer_id = str(customer_ref.get("value", ""))
+    customer_name = str(customer_ref.get("name", ""))
+    amount = float(invoice.get("TotalAmt", 0))
+    balance = float(invoice.get("Balance", 0))
+
+    if action == "STATUS":
+        if balance <= 0:
+            status = "PAID"
+        elif balance < amount:
+            status = f"PARTIAL (balance {balance:.3f} KWD)"
+        else:
+            status = f"OPEN (balance {balance:.3f} KWD)"
+        return AdminActionResult(
+            reply=f"Invoice #{doc_number} — {customer_name}: {status}"
+        )
+
+    if action == "RESEND":
+        if balance <= 0:
+            return AdminActionResult(
+                reply=f"Invoice #{doc_number} is already paid — not resent.",
+                ok=False,
+            )
+        if whatsapp_client is None:
+            return AdminActionResult(reply="WhatsApp is not configured.", ok=False)
+        sent = resend_customer_whatsapp(
+            invoice,
+            qbo_client=qbo_client,
+            whatsapp_client=whatsapp_client,
+            settings=settings,
+        )
+        if sent:
+            return AdminActionResult(
+                reply=f"Invoice #{doc_number} resent to {customer_name}."
+            )
+        return AdminActionResult(
+            reply=f"Could not resend invoice #{doc_number} (no valid mobile or link).",
+            ok=False,
+        )
+
+    if action == "PAID":
+        if balance <= 0:
+            return AdminActionResult(
+                reply=f"Invoice #{doc_number} is already paid in QuickBooks."
+            )
+        try:
+            payment = qbo_client.create_bank_transfer_payment(
+                customer_id=customer_id,
+                invoice_id=invoice_id,
+                amount=balance,
+            )
+            payment_id = str(payment.get("Id", ""))
+            record = db.get_by_invoice_id(invoice_id)
+            if record and record.get("status") != "PAYMENT_CAPTURED":
+                db.mark_payment_captured(invoice_id, qbo_payment_id=payment_id)
+            _LOG.info(
+                "admin_bank_payment_created",
+                extra={
+                    "invoice_id": invoice_id,
+                    "doc_number": doc_number,
+                    "qbo_payment_id": payment_id,
+                },
+            )
+            return AdminActionResult(
+                reply=(
+                    f"Invoice #{doc_number} marked PAID in QBO "
+                    f"(payment {payment_id}, {balance:.3f} KWD)."
+                )
+            )
+        except QBOError as exc:
+            _LOG.error(
+                "admin_bank_payment_failed",
+                extra={"invoice_id": invoice_id, "error": str(exc)},
+            )
+            return AdminActionResult(
+                reply=f"Failed to mark invoice #{doc_number} paid: {exc}",
+                ok=False,
+            )
+
+    return AdminActionResult(reply=f"Unknown action: {action}", ok=False)

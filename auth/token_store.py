@@ -42,12 +42,21 @@ def bootstrap_from_env(path: str, *, force: bool = False) -> bool:
     """
     import base64
 
+    from logging_config import get_logger
+
+    _log = get_logger("auth.token_store")
     env_val = os.getenv("QBO_TOKENS_JSON", "").strip()
     if not env_val:
         return False
     if os.path.exists(path) and not force:
         return False   # file already there — don't overwrite
     try:
+        # Render env vars must be base64 of tokens.json — not raw JSON.
+        if env_val.startswith("{"):
+            raise ValueError(
+                "QBO_TOKENS_JSON looks like raw JSON; paste the base64 output "
+                "from `python -m scripts.encode_tokens_for_render` instead."
+            )
         padded = env_val + "=" * (4 - len(env_val) % 4) if len(env_val) % 4 != 0 else env_val
         decoded = base64.b64decode(padded).decode("utf-8")
         json.loads(decoded)  # validate it's parseable before writing
@@ -60,7 +69,8 @@ def bootstrap_from_env(path: str, *, force: bool = False) -> bool:
         except OSError:
             pass
         return True
-    except Exception:
+    except Exception as exc:
+        _log.error("qbo_tokens_bootstrap_failed", extra={"error": str(exc), "path": path})
         return False
 
 
