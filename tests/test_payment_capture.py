@@ -119,6 +119,13 @@ def test_already_captured_returns_existing(monkeypatch):
 
 def test_unknown_charge_returns_error(monkeypatch):
     monkeypatch.setattr(db_module, "get_by_charge_id", lambda _: None)
+    monkeypatch.setattr(db_module, "init_table", lambda: None)
+
+    tap = MagicMock()
+    tap.get_charge.return_value = {"metadata": {}}
+    monkeypatch.setattr("config.get_settings", lambda: MagicMock())
+    monkeypatch.setattr("tap.client.tap_client_from_settings", lambda _: tap)
+
     qbo = _mock_qbo()
 
     result = handle_payment_capture("chg_unknown", 48.0, qbo_client=qbo)
@@ -126,6 +133,55 @@ def test_unknown_charge_returns_error(monkeypatch):
     assert isinstance(result, CaptureError)
     assert result.reason == "CHARGE_NOT_FOUND"
     qbo.create_payment.assert_not_called()
+
+
+def test_recovers_from_tap_metadata_when_db_missing(monkeypatch):
+    monkeypatch.setattr(db_module, "get_by_charge_id", lambda _: None)
+    monkeypatch.setattr(db_module, "init_table", lambda: None)
+    monkeypatch.setattr(db_module, "mark_payment_captured", lambda inv_id, **kw: None)
+
+    tap = MagicMock()
+    tap.get_charge.return_value = {
+        "metadata": {
+            "qbo_invoice_id": INVOICE_ID,
+            "invoice_number": "2527",
+            "qbo_customer_id": "99",
+        }
+    }
+    monkeypatch.setattr("config.get_settings", lambda: MagicMock())
+    monkeypatch.setattr("tap.client.tap_client_from_settings", lambda _: tap)
+
+    qbo = _mock_qbo()
+    result = handle_payment_capture(CHARGE_ID, 48.0, qbo_client=qbo)
+
+    assert isinstance(result, CaptureResult)
+    assert result.status == "PAYMENT_CAPTURED"
+    assert result.invoice_id == INVOICE_ID
+    qbo.create_payment.assert_called_once()
+
+
+def test_recovers_from_tap_invoice_when_id_starts_with_inv(monkeypatch):
+    monkeypatch.setattr(db_module, "get_by_charge_id", lambda _: None)
+    monkeypatch.setattr(db_module, "init_table", lambda: None)
+    monkeypatch.setattr(db_module, "mark_payment_captured", lambda inv_id, **kw: None)
+
+    tap = MagicMock()
+    tap.get_tap_invoice.return_value = {
+        "metadata": {
+            "qbo_invoice_id": INVOICE_ID,
+            "invoice_number": "2527",
+            "qbo_customer_id": "99",
+        }
+    }
+    monkeypatch.setattr("config.get_settings", lambda: MagicMock())
+    monkeypatch.setattr("tap.client.tap_client_from_settings", lambda _: tap)
+
+    qbo = _mock_qbo()
+    result = handle_payment_capture("inv_test123", 48.0, qbo_client=qbo)
+
+    assert isinstance(result, CaptureResult)
+    tap.get_tap_invoice.assert_called_once_with("inv_test123")
+    tap.get_charge.assert_not_called()
 
 
 def test_qbo_failure_returns_error(monkeypatch):
