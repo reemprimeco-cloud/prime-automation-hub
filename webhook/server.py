@@ -128,13 +128,25 @@ async def receive_qbo_webhook(
 
     events_stored = store_webhook_payload(payload, payload_bytes.decode("utf-8"))
 
-    # ── auto-process Invoice Create events ────────────────────────────────────
+    # ── auto-process Invoice Create / Update (no link yet) ────────────────────
     invoice_ids_to_process: list[str] = []
     for notification in payload.get("eventNotifications", []):
         entities = notification.get("dataChangeEvent", {}).get("entities", [])
         for entity in entities:
-            if entity.get("name") == "Invoice" and entity.get("operation") == "Create":
-                invoice_ids_to_process.append(entity["id"])
+            if entity.get("name") != "Invoice":
+                continue
+            operation = entity.get("operation", "")
+            invoice_id = str(entity.get("id", ""))
+            if not invoice_id:
+                continue
+            if operation == "Create":
+                invoice_ids_to_process.append(invoice_id)
+            elif operation == "Update":
+                from db import payment_links as db
+
+                db.init_table()
+                if db.get_by_invoice_id(invoice_id) is None:
+                    invoice_ids_to_process.append(invoice_id)
 
     for invoice_id in invoice_ids_to_process:
         _LOG.info("qbo_invoice_create_detected", extra={"invoice_id": invoice_id})
@@ -345,6 +357,42 @@ async def receive_whatsapp_webhook(request: Request) -> dict:
         "action": action,
         "doc_number": doc_number,
         "reply": result.reply,
+    }
+
+
+# ── admin: manual invoice processing ───────────────────────────────────────────
+
+@app.post("/admin/process-invoice/{doc_number}", status_code=status.HTTP_200_OK)
+async def admin_process_invoice(
+    doc_number: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict:
+    """Manually queue Tap link generation for an invoice (missed webhook recovery)."""
+    verifier_token = os.getenv("QBO_WEBHOOK_VERIFIER_TOKEN", "").strip()
+    admin_token = request.headers.get("X-Admin-Token", "").strip()
+    if not verifier_token or admin_token != verifier_token:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    from qbo.client import QuickBooksClient
+    from config import get_settings
+
+    qbo = QuickBooksClient(settings=get_settings())
+    invoice = qbo.find_invoice_by_doc_number(doc_number.strip().lstrip("#"))
+    if invoice is None:
+        raise HTTPException(status_code=404, detail=f"Invoice #{doc_number} not found")
+
+    invoice_id = str(invoice.get("Id", ""))
+    balance = float(invoice.get("Balance", 0))
+    if balance <= 0:
+        return {"status": "skipped", "reason": "ALREADY_PAID", "invoice_id": invoice_id}
+
+    background_tasks.add_task(_process_qbo_invoice, invoice_id)
+    _LOG.info("admin_process_invoice_queued", extra={"invoice_id": invoice_id, "doc_number": doc_number})
+    return {
+        "status": "queued",
+        "invoice_id": invoice_id,
+        "doc_number": doc_number,
     }
 
 
