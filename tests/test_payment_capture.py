@@ -184,6 +184,74 @@ def test_recovers_from_tap_invoice_when_id_starts_with_inv(monkeypatch):
     tap.get_charge.assert_not_called()
 
 
+def test_charge_webhook_finds_db_record_by_qbo_invoice_id(monkeypatch):
+    db_record = dict(DB_RECORD)
+    db_record["tap_charge_id"] = "inv_stored123"
+
+    monkeypatch.setattr(db_module, "get_by_charge_id", lambda _: None)
+    monkeypatch.setattr(db_module, "get_by_invoice_id", lambda inv_id: db_record if inv_id == INVOICE_ID else None)
+    monkeypatch.setattr(db_module, "init_table", lambda: None)
+    monkeypatch.setattr(db_module, "mark_payment_captured", lambda inv_id, **kw: None)
+
+    qbo = _mock_qbo()
+    payload = {
+        "id": "chg_transaction123",
+        "status": "CAPTURED",
+        "reference": {"order": INVOICE_ID, "invoice": "INV-2527"},
+        "metadata": {
+            "qbo_invoice_id": INVOICE_ID,
+            "invoice_number": "2527",
+            "qbo_customer_id": "99",
+        },
+    }
+    result = handle_payment_capture(
+        "chg_transaction123",
+        48.0,
+        qbo_client=qbo,
+        tap_webhook_payload=payload,
+    )
+
+    assert isinstance(result, CaptureResult)
+    assert result.status == "PAYMENT_CAPTURED"
+    qbo.create_payment.assert_called_once()
+
+
+def test_charge_webhook_resolves_inv_id_from_payload(monkeypatch):
+    db_record = dict(DB_RECORD)
+    db_record["tap_charge_id"] = "inv_parent123"
+
+    monkeypatch.setattr(
+        db_module,
+        "get_by_charge_id",
+        lambda charge_id: db_record if charge_id == "inv_parent123" else None,
+    )
+    monkeypatch.setattr(db_module, "init_table", lambda: None)
+    monkeypatch.setattr(db_module, "mark_payment_captured", lambda inv_id, **kw: None)
+
+    tap = MagicMock()
+    tap.get_charge.side_effect = Exception("404 charge not found")
+    monkeypatch.setattr("config.get_settings", lambda: MagicMock())
+    monkeypatch.setattr("tap.client.tap_client_from_settings", lambda _: tap)
+
+    qbo = _mock_qbo()
+    payload = {
+        "id": "chg_transaction123",
+        "invoice_id": "inv_parent123",
+        "status": "CAPTURED",
+    }
+    result = handle_payment_capture(
+        "chg_transaction123",
+        48.0,
+        qbo_client=qbo,
+        tap_webhook_payload=payload,
+    )
+
+    assert isinstance(result, CaptureResult)
+    assert result.invoice_id == INVOICE_ID
+    assert result.status == "PAYMENT_CAPTURED"
+    tap.get_charge.assert_not_called()
+
+
 def test_qbo_failure_returns_error(monkeypatch):
     from qbo.client import QBOError
     _mock_db(monkeypatch)

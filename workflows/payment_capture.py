@@ -19,6 +19,113 @@ from qbo.client import QBOError, QuickBooksClient
 _LOG = get_logger("workflow.payment_capture")
 
 
+def _qbo_ids_from_tap_data(data: dict) -> tuple[str, str, str]:
+    """Extract QBO invoice/customer IDs from Tap API or webhook JSON."""
+    metadata = data.get("metadata") or {}
+    invoice_id = str(metadata.get("qbo_invoice_id") or "")
+    invoice_number = str(metadata.get("invoice_number") or "")
+    customer_id = str(metadata.get("qbo_customer_id") or "")
+
+    ref = data.get("reference") or {}
+    if not invoice_id:
+        invoice_id = str(ref.get("order") or "")
+    if not invoice_number:
+        inv_ref = str(ref.get("invoice") or "")
+        if inv_ref.upper().startswith("INV-"):
+            invoice_number = inv_ref[4:]
+
+    return invoice_id, invoice_number, customer_id
+
+
+def _lookup_payment_record(
+    tap_charge_id: str,
+    amount: float,
+    currency: str,
+    *,
+    tap_webhook_payload: dict | None = None,
+) -> dict | None:
+    """Resolve a payment_links row from DB, webhook payload, or Tap API."""
+    record = db.get_by_charge_id(tap_charge_id)
+    if record is not None:
+        return record
+
+    payload = tap_webhook_payload or {}
+
+    # Charge webhooks (chg_…) often hit while DB stores the Tap invoice id (inv_…).
+    for candidate in (
+        str(payload.get("invoice_id") or ""),
+        str((payload.get("invoice") or {}).get("id") if isinstance(payload.get("invoice"), dict) else ""),
+    ):
+        if candidate.startswith("inv_"):
+            record = db.get_by_charge_id(candidate)
+            if record is not None:
+                _LOG.info(
+                    "capture_found_by_tap_invoice_id",
+                    extra={"tap_charge_id": tap_charge_id, "tap_invoice_id": candidate},
+                )
+                return record
+
+    invoice_id, invoice_number, customer_id = _qbo_ids_from_tap_data(payload)
+    if invoice_id:
+        record = db.get_by_invoice_id(invoice_id)
+        if record is not None:
+            _LOG.info(
+                "capture_found_by_qbo_invoice_id",
+                extra={"tap_charge_id": tap_charge_id, "invoice_id": invoice_id},
+            )
+            return record
+
+    from config import get_settings
+    from tap.client import tap_client_from_settings
+
+    settings = get_settings()
+    tap = tap_client_from_settings(settings)
+
+    charge_data: dict | None = None
+    if tap_charge_id.startswith("inv_"):
+        charge_data = tap.get_tap_invoice(tap_charge_id)
+    else:
+        try:
+            charge_data = tap.get_charge(tap_charge_id)
+        except Exception:
+            # Invoice-mode payments expose metadata on the invoice, not the charge.
+            charge_data = payload or None
+            inv_id = str(payload.get("invoice_id") or "")
+            if inv_id.startswith("inv_"):
+                try:
+                    charge_data = tap.get_tap_invoice(inv_id)
+                except Exception:
+                    pass
+
+    if not charge_data:
+        return None
+
+    invoice_id, invoice_number, customer_id = _qbo_ids_from_tap_data(charge_data)
+    if not invoice_id:
+        return None
+
+    record = db.get_by_invoice_id(invoice_id)
+    if record is not None:
+        _LOG.info(
+            "capture_recovered_from_tap",
+            extra={"invoice_id": invoice_id, "tap_charge_id": tap_charge_id},
+        )
+        return record
+
+    return {
+        "invoice_id": invoice_id,
+        "invoice_number": invoice_number,
+        "customer_id": customer_id,
+        "customer_name": "",
+        "amount": amount,
+        "currency": currency,
+        "status": None,
+        "whatsapp_to_number": "",
+        "qbo_payment_id": "",
+        "whatsapp_sent": False,
+    }
+
+
 # ── result types ──────────────────────────────────────────────────────────────
 
 @dataclass
@@ -53,6 +160,7 @@ def handle_payment_capture(
     qbo_client: QuickBooksClient,
     whatsapp_client=None,
     tap_payment_ref: str = "",
+    tap_webhook_payload: dict | None = None,
 ) -> CaptureResult | CaptureError:
     """Process a captured Tap payment end-to-end.
 
@@ -65,50 +173,32 @@ def handle_payment_capture(
     db.init_table()
 
     # ── 1. Look up the payment link record ────────────────────────────────────
-    record = db.get_by_charge_id(tap_charge_id)
+    try:
+        record = _lookup_payment_record(
+            tap_charge_id,
+            amount,
+            currency,
+            tap_webhook_payload=tap_webhook_payload,
+        )
+    except Exception as exc:
+        _LOG.error(
+            "capture_tap_lookup_failed",
+            extra={"tap_charge_id": tap_charge_id, "error": str(exc)},
+        )
+        return CaptureError(
+            tap_charge_id=tap_charge_id,
+            reason="CHARGE_NOT_FOUND",
+            detail=str(exc),
+        )
+
     if record is None:
-        # DB may have been wiped — try to recover from Tap charge metadata
         _LOG.warning("capture_charge_not_found_in_db", extra={"tap_charge_id": tap_charge_id})
-        try:
-            from tap.client import tap_client_from_settings
-            from config import get_settings
-            settings = get_settings()
-            tap = tap_client_from_settings(settings)
-            if tap_charge_id.startswith("inv_"):
-                charge_data = tap.get_tap_invoice(tap_charge_id)
-            else:
-                charge_data = tap.get_charge(tap_charge_id)
-            metadata = charge_data.get("metadata") or {}
-            invoice_id_meta = metadata.get("qbo_invoice_id", "")
-            invoice_number_meta = metadata.get("invoice_number", "")
-            customer_id_meta = metadata.get("qbo_customer_id", "")
-            if not invoice_id_meta:
-                _LOG.warning("capture_no_metadata", extra={"tap_charge_id": tap_charge_id})
-                return CaptureError(
-                    tap_charge_id=tap_charge_id,
-                    reason="CHARGE_NOT_FOUND",
-                    detail="No payment_link record or metadata found for this charge ID.",
-                )
-            record = {
-                "invoice_id": invoice_id_meta,
-                "invoice_number": invoice_number_meta,
-                "customer_id": customer_id_meta,
-                "customer_name": "",
-                "amount": amount,
-                "currency": currency,
-                "status": None,
-                "whatsapp_to_number": "",
-                "qbo_payment_id": "",
-                "whatsapp_sent": False,
-            }
-            _LOG.info("capture_recovered_from_tap", extra={"invoice_id": invoice_id_meta})
-        except Exception as exc:
-            _LOG.error("capture_tap_lookup_failed", extra={"tap_charge_id": tap_charge_id, "error": str(exc)})
-            return CaptureError(
-                tap_charge_id=tap_charge_id,
-                reason="CHARGE_NOT_FOUND",
-                detail=str(exc),
-            )
+        _LOG.warning("capture_no_metadata", extra={"tap_charge_id": tap_charge_id})
+        return CaptureError(
+            tap_charge_id=tap_charge_id,
+            reason="CHARGE_NOT_FOUND",
+            detail="No payment_link record or metadata found for this charge ID.",
+        )
 
     invoice_id     = record["invoice_id"]
     customer_id    = record["customer_id"]

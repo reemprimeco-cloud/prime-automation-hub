@@ -221,6 +221,7 @@ async def receive_tap_webhook(request: Request) -> dict:
             qbo_client=qbo,
             whatsapp_client=wa,
             tap_payment_ref=capture_ref,
+            tap_webhook_payload=payload,
         )
 
         if isinstance(result, CaptureError):
