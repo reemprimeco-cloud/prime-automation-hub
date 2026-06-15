@@ -149,12 +149,18 @@ def test_endpoint_rejects_missing_signature(web_client):
     assert resp.status_code == 401
 
 
-def test_health_endpoint(web_client):
+def test_health_endpoint(web_client, monkeypatch):
+    class _FakeQBO:
+        def get_company_info(self):
+            return {"CompanyName": "Test Co"}
+
+    monkeypatch.setattr("qbo.client.QuickBooksClient", lambda settings=None: _FakeQBO())
     resp = web_client.get("/health")
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "healthy"
-    assert body["qbo_token_configured"] is True
+    assert body["qbo_webhook_verifier_configured"] is True
+    assert body["qbo_api_ok"] is True
 
 
 def test_payment_success_page(web_client):
@@ -260,6 +266,11 @@ def test_whatsapp_webhook_handles_paid_action(web_client, monkeypatch):
 def test_tap_webhook_unknown_charge_after_startup(web_client, tmp_path, monkeypatch):
     db_path = str(tmp_path / "hub.db")
     monkeypatch.setenv("DATABASE_PATH", db_path)
+
+    class _FakeQBO:
+        pass
+
+    monkeypatch.setattr("qbo.client.QuickBooksClient", lambda settings=None: _FakeQBO())
 
     from webhook.server import app
     client = TestClient(app, raise_server_exceptions=True)

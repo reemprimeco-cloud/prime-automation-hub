@@ -72,10 +72,21 @@ def main() -> None:
         sys.exit(1)
 
     _ok("Hub is healthy")
-    if health.get("qbo_token_configured"):
+    if health.get("qbo_webhook_verifier_configured") or health.get("qbo_token_configured"):
         _ok("QBO webhook verifier configured on Render")
     else:
         _fail("QBO_WEBHOOK_VERIFIER_TOKEN missing on Render")
+
+    if health.get("qbo_api_ok"):
+        _ok("QBO API connection working")
+    elif health.get("qbo_api_error"):
+        _fail(f"QBO API error — refresh tokens: {health['qbo_api_error'][:80]}")
+        print()
+        print("  Fix: Mac → python -m scripts.authorize → encode_tokens_for_render")
+        print("       Render → update QBO_TOKENS_JSON → python -m scripts.bootstrap_tokens_from_env")
+        sys.exit(1)
+    else:
+        _warn("QBO API status unknown — deploy latest code for qbo_api_ok in /health")
 
     events = health.get("recent_events") or []
     if events:

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Optional
 from urllib.parse import parse_qs
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, status
@@ -42,11 +43,11 @@ async def _startup() -> None:
         from auth.token_store import bootstrap_from_env
 
         settings = get_settings()
-        if bootstrap_from_env(settings.token_path, force=True):
+        if bootstrap_from_env(settings.token_path, force=False):
             _LOG.info("qbo_tokens_bootstrapped_from_env")
-        else:
+        elif not os.path.exists(settings.token_path):
             _LOG.error(
-                "qbo_tokens_bootstrap_skipped",
+                "qbo_tokens_missing",
                 extra={"token_path": settings.token_path},
             )
     _LOG.info("database_ready")
@@ -108,7 +109,7 @@ def _process_qbo_invoice(invoice_id: str) -> None:
 async def receive_qbo_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
-    intuit_signature: str | None = Header(default=None, alias="intuit-signature"),
+    intuit_signature: Optional[str] = Header(default=None, alias="intuit-signature"),
 ) -> dict:
     """Receive QBO change notification, verify, store, and process Invoice Creates."""
     payload_bytes: bytes = await request.body()
@@ -374,11 +375,17 @@ async def admin_process_invoice(
     if not verifier_token or admin_token != verifier_token:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
-    from qbo.client import QuickBooksClient
+    from qbo.client import NotAuthorizedError, QBOError, QuickBooksClient
     from config import get_settings
 
-    qbo = QuickBooksClient(settings=get_settings())
-    invoice = qbo.find_invoice_by_doc_number(doc_number.strip().lstrip("#"))
+    try:
+        qbo = QuickBooksClient(settings=get_settings())
+        invoice = qbo.find_invoice_by_doc_number(doc_number.strip().lstrip("#"))
+    except NotAuthorizedError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except QBOError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
     if invoice is None:
         raise HTTPException(status_code=404, detail=f"Invoice #{doc_number} not found")
 
@@ -400,9 +407,24 @@ async def admin_process_invoice(
 
 @app.get("/health")
 async def health() -> dict:
+    qbo_api_ok = False
+    qbo_api_error = ""
+    try:
+        from config import get_settings
+        from qbo.client import QuickBooksClient
+
+        qbo = QuickBooksClient(settings=get_settings())
+        qbo.get_company_info()
+        qbo_api_ok = True
+    except Exception as exc:
+        qbo_api_error = str(exc)[:200]
+
     return {
         "status": "healthy",
-        "qbo_token_configured": bool(os.getenv("QBO_WEBHOOK_VERIFIER_TOKEN", "")),
+        "qbo_webhook_verifier_configured": bool(os.getenv("QBO_WEBHOOK_VERIFIER_TOKEN", "")),
+        "qbo_token_configured": bool(os.getenv("QBO_TOKENS_JSON", "").strip()),
+        "qbo_api_ok": qbo_api_ok,
+        "qbo_api_error": qbo_api_error or None,
         "tap_events_stored": count_all_events(),
         "recent_events": get_recent_events(limit=5),
     }
