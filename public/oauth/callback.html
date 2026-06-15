@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>QuickBooks authorization</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 640px;
+        margin: 40px auto;
+        padding: 0 16px;
+        line-height: 1.5;
+      }
+      .url {
+        word-break: break-all;
+        background: #f4f4f4;
+        padding: 12px;
+        border-radius: 8px;
+      }
+      .error {
+        color: #b00020;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="content">Loading…</div>
+    <script>
+      const params = new URLSearchParams(window.location.search);
+      const error = params.get("error");
+      const code = params.get("code");
+      const realmId = params.get("realmId");
+      const callbackUrl = window.location.href;
+      const root = document.getElementById("content");
+
+      if (error) {
+        root.innerHTML =
+          "<h2 class=\"error\">QuickBooks authorization failed</h2>" +
+          "<p><strong>Error:</strong> " + error + "</p>" +
+          "<p>Check that the redirect URI is registered on your Intuit app (Production tab).</p>";
+      } else if (code) {
+        root.innerHTML =
+          "<h2>QuickBooks authorization complete</h2>" +
+          "<p>Copy the <strong>full URL</strong> below and paste it into your terminal when <code>python -m scripts.authorize</code> asks for the callback URL.</p>" +
+          "<p class=\"url\">" + callbackUrl + "</p>" +
+          "<p><strong>realmId:</strong> " + (realmId || "(missing)") + "</p>" +
+          "<p>You can close this tab after pasting the URL in the terminal.</p>";
+      } else {
+        root.innerHTML =
+          "<h2>No authorization data</h2>" +
+          "<p>Start authorization from your Mac:</p>" +
+          "<p class=\"url\">python -m scripts.authorize</p>";
+      }
+    </script>
+  </body>
+</html>

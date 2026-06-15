@@ -103,6 +103,13 @@ def main() -> None:
             f"from the address bar ({settings.redirect_uri}?...) and paste it here:\n"
         )
         pasted = input("Callback URL: ").strip()
+        if "oauth2/error" in pasted or "error=" in parse_qs(urlparse(pasted).query):
+            print(
+                "\nThat URL is an Intuit error page, not a successful callback.\n"
+                "Fix the redirect URI in Intuit Developer → Production → Redirect URIs,\n"
+                f"then try again. It must match exactly:\n\n  {settings.redirect_uri}\n",
+                file=sys.stderr,
+            )
         callback = _parse_callback_url(pasted)
 
     if callback.get("error"):

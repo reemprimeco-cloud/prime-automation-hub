@@ -163,6 +163,19 @@ def test_health_endpoint(web_client, monkeypatch):
     assert body["qbo_api_ok"] is True
 
 
+def test_oauth_callback_success_page(web_client):
+    resp = web_client.get("/oauth/callback?code=abc&realmId=123&state=xyz")
+    assert resp.status_code == 200
+    assert "authorization complete" in resp.text.lower()
+    assert "realmId" in resp.text
+
+
+def test_oauth_callback_error_page(web_client):
+    resp = web_client.get("/oauth/callback?error=access_denied")
+    assert resp.status_code == 200
+    assert "authorization failed" in resp.text.lower()
+
+
 def test_payment_success_page(web_client):
     resp = web_client.get("/payment/success")
     assert resp.status_code == 200

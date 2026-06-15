@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import json
 import os
+from html import escape
 from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, status
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from db.payment_links import bootstrap_links_from_file, init_table as init_payment_links_table
 from logging_config import get_logger
@@ -30,6 +31,7 @@ app = FastAPI(title="Prime Automation Hub", version="1.0.0")
 
 _PUBLIC_DIR = Path(__file__).resolve().parent.parent / "public"
 _PAYMENT_SUCCESS_PAGE = _PUBLIC_DIR / "payment" / "success.html"
+_OAUTH_CALLBACK_PAGE = _PUBLIC_DIR / "oauth" / "callback.html"
 
 
 @app.on_event("startup")
@@ -255,6 +257,48 @@ async def receive_tap_webhook(request: Request) -> dict:
     except Exception as exc:
         _LOG.error("tap_webhook_error", extra={"error": str(exc)})
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── OAuth callback (hosted redirect — no localhost) ───────────────────────────
+
+def _oauth_callback_html(*, error: str = "", callback_url: str = "", realm_id: str = "") -> str:
+    safe_error = escape(error)
+    safe_url = escape(callback_url)
+    safe_realm = escape(realm_id)
+    if error:
+        base = escape(callback_url.split("?", 1)[0] if callback_url else "/oauth/callback")
+        return f"""<!DOCTYPE html>
+<html><body style="font-family:sans-serif;max-width:640px;margin:40px auto;padding:0 16px;">
+  <h2 style="color:#b00020">QuickBooks authorization failed</h2>
+  <p><strong>Error:</strong> {safe_error}</p>
+  <p>Register <code>{base}</code> under Redirect URIs on your Intuit app (Production tab).</p>
+</body></html>"""
+    return f"""<!DOCTYPE html>
+<html><body style="font-family:sans-serif;max-width:640px;margin:40px auto;padding:0 16px;line-height:1.5;">
+  <h2>QuickBooks authorization complete</h2>
+  <p>Copy the <strong>full URL</strong> from your browser address bar and paste it into your
+     terminal when <code>python -m scripts.authorize</code> asks for the callback URL.</p>
+  <p style="word-break:break-all;background:#f4f4f4;padding:12px;border-radius:8px;">{safe_url}</p>
+  <p><strong>realmId:</strong> {safe_realm or "(missing)"}</p>
+  <p>You can close this tab after pasting the URL in the terminal.</p>
+</body></html>"""
+
+
+@app.get("/oauth/callback")
+async def oauth_callback(request: Request) -> HTMLResponse:
+    """Landing page after Intuit OAuth — copy the URL back to scripts.authorize."""
+    params = dict(request.query_params)
+    error = params.get("error", "")
+    callback_url = str(request.url)
+    if _OAUTH_CALLBACK_PAGE.is_file() and not error and params.get("code"):
+        return FileResponse(_OAUTH_CALLBACK_PAGE, media_type="text/html; charset=utf-8")
+    return HTMLResponse(
+        _oauth_callback_html(
+            error=error,
+            callback_url=callback_url,
+            realm_id=params.get("realmId", ""),
+        )
+    )
 
 
 # ── Tap payment redirect landing page ─────────────────────────────────────────
