@@ -1,5 +1,6 @@
 .env
 tokens.json
+tokens_for_render.b64
 hub.db
 .venv/
 __pycache__/

@@ -85,6 +85,8 @@ def main() -> None:
     expected_state = auth_client.state_token
 
     print("Opening your browser to authorize access to QuickBooks...")
+    print(f"Environment: {settings.environment.upper()} — use your LIVE company, not sandbox.")
+    print(f"If you see 'no sandbox companies', your keys are from the Development tab.\n")
     print(f"If it doesn't open automatically, paste this URL:\n\n{auth_url}\n")
     try:
         webbrowser.open(auth_url)
@@ -103,27 +105,44 @@ def main() -> None:
             f"from the address bar ({settings.redirect_uri}?...) and paste it here:\n"
         )
         pasted = input("Callback URL: ").strip()
-        if "oauth2/error" in pasted or "error=" in parse_qs(urlparse(pasted).query):
+        if "oauth2/error" in pasted:
             print(
-                "\nThat URL is an Intuit error page, not a successful callback.\n"
-                "Fix the redirect URI in Intuit Developer → Production → Redirect URIs,\n"
-                f"then try again. It must match exactly:\n\n  {settings.redirect_uri}\n",
+                "\nThat URL is Intuit's error page — authorization did not succeed.\n"
+                "Register this redirect URI in Intuit Developer → Production → Redirect URIs:\n\n"
+                f"  {settings.redirect_uri}\n\n"
+                "Then run `python -m scripts.authorize` again (one fresh attempt).\n",
                 file=sys.stderr,
             )
+            sys.exit(1)
         callback = _parse_callback_url(pasted)
+        if callback.get("error"):
+            print(
+                f"\nAuthorization failed: {callback['error']}\n"
+                f"Confirm this URI is saved in Intuit (Production tab):\n\n  {settings.redirect_uri}\n",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     if callback.get("error"):
         print(f"Authorization failed: {callback['error']}", file=sys.stderr)
         sys.exit(1)
+    if not callback.get("code"):
+        print(
+            "No authorization code in callback URL.\n"
+            "You must paste the success URL (contains code= and realmId=), not an error page.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if callback.get("state") != expected_state:
-        print("State token mismatch — possible CSRF. Aborting.", file=sys.stderr)
+        print(
+            "State token mismatch — this URL is from a different authorize run.\n"
+            "Run `python -m scripts.authorize` once, complete in the browser, then paste immediately.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     code = callback.get("code")
     realm_id = callback.get("realm_id")
-    if not code:
-        print("No authorization code in callback URL.", file=sys.stderr)
-        sys.exit(1)
     if not realm_id:
         print("No realmId returned — did you select a company?", file=sys.stderr)
         sys.exit(1)
