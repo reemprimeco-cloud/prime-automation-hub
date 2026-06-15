@@ -30,6 +30,30 @@ class TokenData:
         return time.time() >= (self.refresh_token_expires_at - leeway)
 
 
+def decode_qbo_tokens_env() -> str:
+    """Decode QBO_TOKENS_JSON from Render env (base64 or raw JSON)."""
+    import base64
+
+    env_val = os.getenv("QBO_TOKENS_JSON", "").strip()
+    if not env_val:
+        raise ValueError("QBO_TOKENS_JSON is empty — set it in Render → Environment")
+
+    if env_val.startswith("{"):
+        decoded = env_val
+    else:
+        try:
+            cleaned = env_val.strip().replace("\n", "").replace("\r", "").replace(" ", ""); padded = cleaned + "=" * (4 - len(cleaned) % 4) if len(cleaned) % 4 != 0 else cleaned
+            decoded = base64.b64decode(padded).decode("utf-8")
+        except Exception as exc:
+            raise ValueError(f"QBO_TOKENS_JSON is not valid base64: {exc}") from exc
+
+    raw = json.loads(decoded)
+    for key in ("access_token", "refresh_token", "realm_id"):
+        if not raw.get(key):
+            raise ValueError(f"tokens JSON missing required field: {key}")
+    return decoded
+
+
 def bootstrap_from_env(path: str, *, force: bool = False) -> bool:
     """Seed tokens.json from QBO_TOKENS_JSON environment variable.
 
@@ -51,15 +75,8 @@ def bootstrap_from_env(path: str, *, force: bool = False) -> bool:
     if os.path.exists(path) and not force:
         return False   # file already there — don't overwrite
     try:
-        # Render env vars must be base64 of tokens.json — not raw JSON.
-        if env_val.startswith("{"):
-            raise ValueError(
-                "QBO_TOKENS_JSON looks like raw JSON; paste the base64 output "
-                "from `python -m scripts.encode_tokens_for_render` instead."
-            )
-        padded = env_val + "=" * (4 - len(env_val) % 4) if len(env_val) % 4 != 0 else env_val
-        decoded = base64.b64decode(padded).decode("utf-8")
-        json.loads(decoded)  # validate it's parseable before writing
+        decoded = decode_qbo_tokens_env()
+        json.loads(decoded)  # validate
         tmp = f"{path}.tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(decoded)
