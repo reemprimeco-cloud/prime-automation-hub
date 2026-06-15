@@ -73,6 +73,21 @@ def _exchange_and_save(auth_client, settings, code: str, realm_id: str) -> None:
 
 
 def main() -> None:
+    import os
+    from pathlib import Path
+
+    if os.getenv("RENDER") or str(Path(__file__).resolve().parent.parent).startswith("/opt/render/"):
+        print(
+            "authorize does not run on Render Shell (no browser).\n\n"
+            "On your Mac:\n"
+            "  source .venv/bin/activate\n"
+            "  python -m scripts.import_tokens\n\n"
+            "On Render after QBO_TOKENS_JSON is set:\n"
+            "  python -m scripts.bootstrap_tokens_from_env",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     settings = get_settings()
     redirect = urlparse(settings.redirect_uri)
     host = redirect.hostname or "localhost"

@@ -81,11 +81,29 @@ def main() -> None:
         print(f"✓  Connected: {name} (realmId {realm})")
     except Exception as exc:
         print(f"✗  API check failed: {exc}", file=sys.stderr)
-        print(
-            "\nTokens saved but refresh may fail — confirm playground used the same\n"
-            "Production Client ID / Secret as your .env (ABLdbtne5RX...).",
-            file=sys.stderr,
-        )
+        err = str(exc).lower()
+        if "invalid_client" in err:
+            print(
+                "\ninvalid_client — Client ID + Secret are wrong or don't match.\n"
+                "Intuit → Keys & credentials → Production → Show credentials\n"
+                "Copy BOTH using the copy button (don't retype).\n"
+                f"  Client ID in .env: {settings.client_id}\n"
+                "  Update QBO_CLIENT_SECRET in .env to match the SAME tab.",
+                file=sys.stderr,
+            )
+        elif "invalid_grant" in err:
+            print(
+                "\ninvalid_grant — refresh token doesn't match this Client ID.\n"
+                "Get a NEW refreshToken from OAuth Playground using the SAME\n"
+                "Client ID + Secret as your .env, then run import_tokens again.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"\nConfirm .env matches Intuit Production tab exactly.\n"
+                f"  Client ID: {settings.client_id[:20]}...",
+                file=sys.stderr,
+            )
         raise SystemExit(1)
 
     import subprocess

@@ -67,9 +67,9 @@ class QuickBooksClient:
             save_tokens(self.settings.token_path, self.tokens)
         except Exception as exc:
             _LOG.error("token_refresh_failed", extra={"error": str(exc)})
+            detail = str(exc).strip() or type(exc).__name__
             raise NotAuthorizedError(
-                "QuickBooks token refresh failed. Re-run `python -m scripts.authorize` "
-                "and update QBO_TOKENS_JSON on Render."
+                f"QuickBooks token refresh failed: {detail}"
             ) from exc
         _LOG.info(
             "token_refresh_complete",

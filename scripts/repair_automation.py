@@ -32,8 +32,26 @@ def _ok(msg: str) -> None:
     print(f"✓  {msg}")
 
 
+def _on_render() -> bool:
+    return bool(os.getenv("RENDER")) or str(ROOT).startswith("/opt/render/")
+
+
 def _check_env() -> None:
     _step("1/4 — Checking configuration")
+    if _on_render():
+        _fail(
+            "You are on Render Shell — repair_automation does not run here.\n\n"
+            "Render uses Environment variables (no .env file).\n\n"
+            "On Render (after QBO_TOKENS_JSON is set in dashboard):\n"
+            "  python -m scripts.bootstrap_tokens_from_env\n"
+            "  python -m scripts.get_company_info\n"
+            "  python -m scripts.process_invoice 2555\n\n"
+            "On your Mac (create tokens first):\n"
+            "  cd ~/Documents/prime-automation-hub\n"
+            "  source .venv/bin/activate\n"
+            "  python -m scripts.repair_automation"
+        )
+
     env_path = ROOT / ".env"
     if not env_path.is_file() and not os.getenv("QBO_CLIENT_ID", "").strip():
         _fail(f"Missing {env_path}. Copy .env.example and fill in Production keys from Intuit.")
@@ -137,12 +155,12 @@ def _encode_and_verify() -> None:
 
 def main() -> None:
     os.chdir(ROOT)
-    if os.getenv("RENDER"):
+    if _on_render():
         _fail(
             "repair_automation runs on your Mac, not Render Shell.\n\n"
             "On Render, after updating QBO_TOKENS_JSON:\n"
-            "  python -m scripts.setup_render\n"
-            "  python -m scripts.setup_render 2555\n\n"
+            "  python -m scripts.bootstrap_tokens_from_env\n"
+            "  python -m scripts.process_invoice 2555\n\n"
             "On your Mac (authorize + create tokens):\n"
             "  source .venv/bin/activate\n"
             "  python -m scripts.repair_automation"
