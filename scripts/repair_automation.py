@@ -33,9 +33,9 @@ def _ok(msg: str) -> None:
 
 
 def _check_env() -> None:
-    _step("1/4 — Checking .env")
+    _step("1/4 — Checking configuration")
     env_path = ROOT / ".env"
-    if not env_path.is_file():
+    if not env_path.is_file() and not os.getenv("QBO_CLIENT_ID", "").strip():
         _fail(f"Missing {env_path}. Copy .env.example and fill in Production keys from Intuit.")
 
     from config import get_settings
@@ -137,6 +137,16 @@ def _encode_and_verify() -> None:
 
 def main() -> None:
     os.chdir(ROOT)
+    if os.getenv("RENDER"):
+        _fail(
+            "repair_automation runs on your Mac, not Render Shell.\n\n"
+            "On Render, after updating QBO_TOKENS_JSON:\n"
+            "  python -m scripts.setup_render\n"
+            "  python -m scripts.setup_render 2555\n\n"
+            "On your Mac (authorize + create tokens):\n"
+            "  source .venv/bin/activate\n"
+            "  python -m scripts.repair_automation"
+        )
     _check_env()
     _clear_bad_tokens()
     _authorize()

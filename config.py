@@ -79,7 +79,10 @@ def get_settings() -> Settings:
     return Settings(
         client_id=_require("QBO_CLIENT_ID"),
         client_secret=_require("QBO_CLIENT_SECRET"),
-        redirect_uri=_require("QBO_REDIRECT_URI"),
+        redirect_uri=(
+            os.getenv("QBO_REDIRECT_URI", "").strip()
+            or "https://prime-qbo-webhook.netlify.app/oauth/callback"
+        ),
         environment=environment,
         minor_version=os.getenv("QBO_MINOR_VERSION", "75").strip(),
         token_path=os.getenv("QBO_TOKEN_PATH", "tokens.json").strip(),
