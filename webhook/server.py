@@ -120,6 +120,12 @@ async def receive_qbo_webhook(
     if not verifier_token:
         raise HTTPException(status_code=500, detail="QBO_WEBHOOK_VERIFIER_TOKEN not set")
 
+    _LOG.info("webhook_debug", extra={
+        "signature_received": intuit_signature or "",
+        "signature_length": len(intuit_signature or ""),
+        "payload_length": len(payload_bytes),
+    })
+
     if not verify_signature(payload_bytes, intuit_signature or "", verifier_token):
         _LOG.warning("qbo_webhook_invalid_signature")
         raise HTTPException(status_code=401, detail="Invalid intuit-signature")

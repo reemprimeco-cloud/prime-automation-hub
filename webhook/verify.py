@@ -14,14 +14,14 @@ import hashlib
 import hmac
 
 
-def compute_signature(payload_bytes: bytes, verifier_token: str) -> str:
-    """Compute the expected intuit-signature value for the given payload and token."""
+def compute_signature(payload_bytes: bytes, verifier_token: str) -> tuple[str, str]:
+    """Compute the expected intuit-signature (base64) and raw digest hex for the payload."""
     digest = hmac.new(
         verifier_token.encode("utf-8"),
         payload_bytes,
         hashlib.sha256,
     ).digest()
-    return base64.b64encode(digest).decode("utf-8")
+    return base64.b64encode(digest).decode("utf-8"), digest.hex()
 
 
 def verify_signature(
@@ -36,5 +36,5 @@ def verify_signature(
     """
     if not signature or not verifier_token:
         return False
-    expected = compute_signature(payload_bytes, verifier_token)
+    expected, _ = compute_signature(payload_bytes, verifier_token)
     return hmac.compare_digest(expected, signature)

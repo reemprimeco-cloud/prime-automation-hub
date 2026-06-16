@@ -46,17 +46,17 @@ SAMPLE_BYTES = json.dumps(SAMPLE_PAYLOAD, separators=(",", ":")).encode()
 # ── signature verification ────────────────────────────────────────────────────
 
 def test_valid_signature_accepted():
-    sig = compute_signature(SAMPLE_BYTES, TOKEN)
+    sig, _ = compute_signature(SAMPLE_BYTES, TOKEN)
     assert verify_signature(SAMPLE_BYTES, sig, TOKEN) is True
 
 
 def test_wrong_token_rejected():
-    sig = compute_signature(SAMPLE_BYTES, TOKEN)
+    sig, _ = compute_signature(SAMPLE_BYTES, TOKEN)
     assert verify_signature(SAMPLE_BYTES, sig, "wrong-token") is False
 
 
 def test_tampered_payload_rejected():
-    sig = compute_signature(SAMPLE_BYTES, TOKEN)
+    sig, _ = compute_signature(SAMPLE_BYTES, TOKEN)
     tampered = SAMPLE_BYTES + b" "
     assert verify_signature(tampered, sig, TOKEN) is False
 
@@ -66,7 +66,7 @@ def test_empty_signature_rejected():
 
 
 def test_empty_token_rejected():
-    sig = compute_signature(SAMPLE_BYTES, TOKEN)
+    sig, _ = compute_signature(SAMPLE_BYTES, TOKEN)
     assert verify_signature(SAMPLE_BYTES, sig, "") is False
 
 
@@ -121,7 +121,7 @@ def web_client(tmp_db, monkeypatch):
 
 
 def test_endpoint_accepts_valid_request(web_client):
-    sig = compute_signature(SAMPLE_BYTES, TOKEN)
+    sig, _ = compute_signature(SAMPLE_BYTES, TOKEN)
     resp = web_client.post(
         "/webhook",
         content=SAMPLE_BYTES,
