@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from db.payment_links import bootstrap_links_from_file, init_table as init_payment_links_table
 from logging_config import get_logger
+from webhook.payload import parse_qbo_webhook_entities, payload_format_hint
 from webhook.storage import (
     count_all_events,
     get_last_webhook_received_at,
@@ -154,23 +155,27 @@ async def receive_qbo_webhook(
 
     # ── auto-process Invoice Create / Update (no link yet) ────────────────────
     invoice_ids_to_process: list[str] = []
-    for notification in payload.get("eventNotifications", []):
-        entities = notification.get("dataChangeEvent", {}).get("entities", [])
-        for entity in entities:
-            if entity.get("name") != "Invoice":
-                continue
-            operation = entity.get("operation", "")
-            invoice_id = str(entity.get("id", ""))
-            if not invoice_id:
-                continue
-            if operation == "Create":
-                invoice_ids_to_process.append(invoice_id)
-            elif operation == "Update":
-                from db import payment_links as db
+    for entity in parse_qbo_webhook_entities(payload):
+        if entity.get("entity_type") != "Invoice":
+            continue
+        operation = entity.get("operation", "")
+        invoice_id = str(entity.get("entity_id", ""))
+        if not invoice_id:
+            continue
+        if operation == "Create":
+            invoice_ids_to_process.append(invoice_id)
+        elif operation == "Update":
+            from db import payment_links as db
 
-                db.init_table()
-                if db.get_by_invoice_id(invoice_id) is None:
-                    invoice_ids_to_process.append(invoice_id)
+            db.init_table()
+            if db.get_by_invoice_id(invoice_id) is None:
+                invoice_ids_to_process.append(invoice_id)
+
+    if not events_stored and payload:
+        _LOG.warning(
+            "qbo_webhook_unparsed_payload",
+            extra={"format": payload_format_hint(payload)},
+        )
 
     for invoice_id in invoice_ids_to_process:
         _LOG.info("qbo_invoice_create_detected", extra={"invoice_id": invoice_id})
@@ -178,7 +183,8 @@ async def receive_qbo_webhook(
 
     _LOG.info("qbo_webhook_received",
               extra={"events_stored": events_stored,
-                     "invoices_queued": len(invoice_ids_to_process)})
+                     "invoices_queued": len(invoice_ids_to_process),
+                     "format": payload_format_hint(payload)})
 
     return {
         "status": "ok",

@@ -14,6 +14,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from logging_config import get_logger
+from webhook.payload import parse_qbo_webhook_entities, payload_format_hint
 
 _LOG = get_logger("webhook.storage")
 
@@ -59,20 +60,17 @@ def store_webhook_payload(payload: dict, raw_json: str) -> int:
     received_at = datetime.now(timezone.utc).isoformat()
     rows: list[tuple] = []
 
-    for notification in payload.get("eventNotifications") or []:
-        realm_id = str(notification.get("realmId") or "")
-        entities = (
-            (notification.get("dataChangeEvent") or {}).get("entities") or []
-        )
-        for entity in entities:
-            rows.append((
+    for entity in parse_qbo_webhook_entities(payload):
+        rows.append(
+            (
                 received_at,
-                realm_id,
-                str(entity.get("name") or ""),
-                str(entity.get("operation") or ""),
-                str(entity.get("id") or ""),
+                entity["realm_id"],
+                entity["entity_type"],
+                entity["operation"],
+                entity["entity_id"],
                 raw_json,
-            ))
+            )
+        )
 
     if rows:
         with _connect() as conn:
@@ -83,7 +81,10 @@ def store_webhook_payload(payload: dict, raw_json: str) -> int:
             extra={"count": len(rows), "realm_id": rows[0][1] if rows else ""},
         )
     else:
-        _LOG.warning("webhook_payload_had_no_entity_changes")
+        _LOG.warning(
+            "webhook_payload_had_no_entity_changes",
+            extra={"format": payload_format_hint(payload)},
+        )
 
     return len(rows)
 

@@ -17,6 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from webhook.verify import compute_signature, verify_signature
+from webhook.payload import parse_qbo_webhook_entities
 from webhook.storage import init_db, store_webhook_payload, count_all_events
 import webhook.storage as _storage_mod
 
@@ -41,6 +42,43 @@ SAMPLE_PAYLOAD = {
     ]
 }
 SAMPLE_BYTES = json.dumps(SAMPLE_PAYLOAD, separators=(",", ":")).encode()
+
+CLOUDEVENTS_PAYLOAD = {
+    "specversion": "1.0",
+    "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "source": "intuit.dsnExample",
+    "type": "qbo.invoice.created.v1",
+    "datacontenttype": "application/json",
+    "time": "2026-06-06T10:00:00Z",
+    "intuitentityid": "99",
+    "intuitaccountid": "9130357945907536",
+    "data": {
+        "entityName": "Invoice",
+        "entityId": "99",
+        "operation": "Create",
+        "lastUpdated": "2026-06-06T10:00:00Z",
+    },
+}
+CLOUDEVENTS_BYTES = json.dumps(CLOUDEVENTS_PAYLOAD, separators=(",", ":")).encode()
+
+
+# ── payload parsing ───────────────────────────────────────────────────────────
+
+def test_parse_legacy_payload():
+    entities = parse_qbo_webhook_entities(SAMPLE_PAYLOAD)
+    assert len(entities) == 2
+    assert entities[0]["entity_type"] == "Invoice"
+    assert entities[0]["operation"] == "Create"
+    assert entities[0]["entity_id"] == "42"
+
+
+def test_parse_cloudevents_payload():
+    entities = parse_qbo_webhook_entities(CLOUDEVENTS_PAYLOAD)
+    assert len(entities) == 1
+    assert entities[0]["entity_type"] == "Invoice"
+    assert entities[0]["operation"] == "Create"
+    assert entities[0]["entity_id"] == "99"
+    assert entities[0]["realm_id"] == "9130357945907536"
 
 
 # ── signature verification ────────────────────────────────────────────────────
@@ -98,6 +136,16 @@ def test_count_all_events(tmp_db):
     assert count_all_events() == 2
 
 
+def test_store_cloudevents_payload(tmp_db):
+    init_db()
+    count = store_webhook_payload(
+        CLOUDEVENTS_PAYLOAD,
+        json.dumps(CLOUDEVENTS_PAYLOAD),
+    )
+    assert count == 1
+    assert count_all_events() == 1
+
+
 def test_empty_payload_stores_zero(tmp_db):
     init_db()
     count = store_webhook_payload({"eventNotifications": []}, "{}")
@@ -118,6 +166,19 @@ def web_client(tmp_db, monkeypatch):
     monkeypatch.setenv("QBO_WEBHOOK_VERIFIER_TOKEN", TOKEN)
     from webhook.server import app
     return TestClient(app, raise_server_exceptions=True)
+
+
+def test_endpoint_accepts_cloudevents_request(web_client):
+    sig, _ = compute_signature(CLOUDEVENTS_BYTES, TOKEN)
+    resp = web_client.post(
+        "/webhook",
+        content=CLOUDEVENTS_BYTES,
+        headers={"Content-Type": "application/json", "intuit-signature": sig},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["events_stored"] == 1
+    assert body["invoices_queued"] == 1
 
 
 def test_endpoint_accepts_valid_request(web_client):

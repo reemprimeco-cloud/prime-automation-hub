@@ -34,6 +34,8 @@ def verify_signature(
     Uses hmac.compare_digest to prevent timing-based side-channel attacks.
     Returns False immediately if the signature or verifier token is empty.
     """
+    signature = (signature or "").strip()
+    verifier_token = (verifier_token or "").strip().strip('"').strip("'")
     if not signature or not verifier_token:
         return False
     expected, _ = compute_signature(payload_bytes, verifier_token)
