@@ -22,7 +22,13 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from db.payment_links import bootstrap_links_from_file, init_table as init_payment_links_table
 from logging_config import get_logger
-from webhook.storage import count_all_events, get_recent_events, init_db, store_webhook_payload
+from webhook.storage import (
+    count_all_events,
+    get_last_webhook_received_at,
+    get_recent_events,
+    init_db,
+    store_webhook_payload,
+)
 from webhook.verify import verify_signature
 
 _LOG = get_logger("webhook.server")
@@ -52,7 +58,15 @@ async def _startup() -> None:
                 "qbo_tokens_missing",
                 extra={"token_path": settings.token_path},
             )
-    _LOG.info("database_ready")
+    _LOG.info(
+        "database_ready",
+        extra={
+            "qbo_webhook_url_render": "https://prime-automation-hub.onrender.com/webhook",
+            "qbo_webhook_url_netlify_proxy": (
+                "https://prime-qbo-webhook.netlify.app/quickbooks-webhook"
+            ),
+        },
+    )
 
 
 # ── QBO invoice processor (background task) ───────────────────────────────────
@@ -470,12 +484,24 @@ async def health() -> dict:
     except Exception as exc:
         qbo_api_error = str(exc)[:200]
 
+    qbo_events_stored = count_all_events()
+    last_qbo_webhook_at = get_last_webhook_received_at()
+
     return {
         "status": "healthy",
-        "qbo_webhook_verifier_configured": bool(os.getenv("QBO_WEBHOOK_VERIFIER_TOKEN", "")),
+        "qbo_webhook_verifier_configured": bool(
+            os.getenv("QBO_WEBHOOK_VERIFIER_TOKEN", "").strip()
+        ),
         "qbo_token_configured": bool(os.getenv("QBO_TOKENS_JSON", "").strip()),
         "qbo_api_ok": qbo_api_ok,
         "qbo_api_error": qbo_api_error or None,
-        "tap_events_stored": count_all_events(),
+        "qbo_webhook_events_stored": qbo_events_stored,
+        "last_qbo_webhook_at": last_qbo_webhook_at,
+        "qbo_webhooks_receiving": qbo_events_stored > 0,
+        "tap_events_stored": qbo_events_stored,
         "recent_events": get_recent_events(limit=5),
+        "expected_qbo_webhook_urls": [
+            "https://prime-automation-hub.onrender.com/webhook",
+            "https://prime-qbo-webhook.netlify.app/quickbooks-webhook",
+        ],
     }

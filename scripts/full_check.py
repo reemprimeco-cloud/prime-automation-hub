@@ -51,8 +51,11 @@ def main() -> None:
         data.get("qbo_api_error") or "",
     )
 
-    events_stored = data.get("tap_events_stored", 0)
-    print(f"ℹ️   Tap events stored: {events_stored}")
+    events_stored = data.get("qbo_webhook_events_stored", data.get("tap_events_stored", 0))
+    last_webhook = data.get("last_qbo_webhook_at")
+    print(f"ℹ️   QBO webhook events stored: {events_stored}")
+    if last_webhook:
+        print(f"ℹ️   Last QBO webhook received: {last_webhook}")
 
     # ── 2. Payment success page ─────────────────────────────────────────────
     try:
@@ -88,16 +91,28 @@ def main() -> None:
         print()
 
     if events_stored == 0:
-        print("⚠️  No QBO webhook events stored yet.")
-        print("   This is expected if no invoice has been created since the last restart.")
-        print("   If you just created an invoice and it didn't arrive, check Render logs")
-        print("   for 'qbo_webhook_invalid_signature' — this means QBO_WEBHOOK_VERIFIER_TOKEN")
-        print("   in Render does not match the Production verifier token in Intuit.")
+        print("⚠️  No QBO webhook events stored — invoice automation cannot start.")
+        print("   Intuit must POST to one of these URLs (Production → Webhooks):")
+        for url in data.get("expected_qbo_webhook_urls") or [
+            "https://prime-automation-hub.onrender.com/webhook",
+            "https://prime-qbo-webhook.netlify.app/quickbooks-webhook",
+        ]:
+            print(f"     • {url}")
+        print()
+        print("   Also verify on Render:")
+        print("     • QBO_WEBHOOK_VERIFIER_TOKEN = Production verifier from Intuit (NOT Development)")
+        print("     • Invoice entity subscribed in Intuit webhook settings")
+        print("   Check Render logs for qbo_webhook_invalid_signature (401 = token mismatch).")
+        print("   After fixing, create a test invoice OR recover manually:")
+        print("     curl -X POST https://prime-automation-hub.onrender.com/admin/process-invoice/DOC# \\")
+        print("       -H 'X-Admin-Token: <your QBO_WEBHOOK_VERIFIER_TOKEN>'")
         print()
 
     print("=" * 60)
-    if all_ok and qbo_ok:
+    if all_ok and qbo_ok and events_stored > 0:
         print("🎉  Everything looks healthy. Safe to create new invoices.")
+    elif all_ok and qbo_ok:
+        print("🔧  Hub is up but QBO webhooks are not arriving — fix Intuit URL / verifier token.")
     else:
         print("🔧  One or more checks failed — see above for what to fix.")
     print("=" * 60)

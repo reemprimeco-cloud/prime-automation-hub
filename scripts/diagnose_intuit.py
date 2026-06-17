@@ -41,6 +41,11 @@ def main() -> None:
         "\nRender must also use Production keys + Production webhook verifier:\n"
         "  QBO_WEBHOOK_VERIFIER_TOKEN=a112e073-d767-4ee2-a6ac-385585fbc12d\n"
         "  (NOT d839fdc2-... which is Development)\n"
+        "\nIntuit Production webhook URL (either works):\n"
+        "  https://prime-automation-hub.onrender.com/webhook\n"
+        "  https://prime-qbo-webhook.netlify.app/quickbooks-webhook\n"
+        "Subscribe to Invoice Create/Update. After creating an invoice, /health should show\n"
+        "qbo_webhook_events_stored > 0.\n"
     )
 
 

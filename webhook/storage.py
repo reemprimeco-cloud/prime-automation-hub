@@ -112,3 +112,17 @@ def get_recent_events(limit: int = 20) -> list[dict]:
             (limit,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_last_webhook_received_at() -> str | None:
+    """Return ISO timestamp of the most recent stored webhook, or None."""
+    if not os.path.exists(_db_path()):
+        return None
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT received_at FROM webhook_events ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return str(row[0]) if row else None
+    except sqlite3.Error:
+        return None

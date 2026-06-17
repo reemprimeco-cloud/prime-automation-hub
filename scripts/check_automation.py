@@ -89,6 +89,9 @@ def main() -> None:
         _warn("QBO API status unknown — deploy latest code for qbo_api_ok in /health")
 
     events = health.get("recent_events") or []
+    events_stored = health.get(
+        "qbo_webhook_events_stored", health.get("tap_events_stored", 0)
+    )
     if events:
         _ok(f"QBO webhooks reaching Render ({len(events)} recent event(s))")
         creates = [e for e in events if e.get("operation") == "Create"]
@@ -96,8 +99,18 @@ def main() -> None:
             _ok("Invoice Create events seen — auto link generation can run")
         else:
             _warn("Only Update/Delete events seen so far — Create triggers auto links")
+    elif events_stored > 0:
+        _warn("Events stored but recent_events empty — check WEBHOOK_DB_PATH / redeploy")
     else:
-        _warn("No QBO webhook events stored yet — confirm Intuit URL points to Render /webhook")
+        _warn("No QBO webhook events stored — Intuit is not reaching Render /webhook")
+        print("       Valid Intuit Production webhook URLs:")
+        for url in health.get("expected_qbo_webhook_urls") or [
+            "https://prime-automation-hub.onrender.com/webhook",
+            "https://prime-qbo-webhook.netlify.app/quickbooks-webhook",
+        ]:
+            print(f"         • {url}")
+        print("       Netlify /quickbooks-webhook now proxies to Render (redeploy Netlify after pull).")
+        print("       If using Render URL directly, set QBO_WEBHOOK_VERIFIER_TOKEN to Production verifier.")
 
     status, success = _get("/payment/success")
     if status == 200 and isinstance(success, str) and "Payment successful" in success:
