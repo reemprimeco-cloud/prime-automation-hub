@@ -182,7 +182,38 @@ class TestProcessInvoice:
         assert result.status == "EXISTING_LINK_RETURNED"
         assert result.payment_url == "https://old.link"
         tap.create_tap_invoice.assert_not_called()
-        qbo.get_invoice.assert_not_called()
+        qbo.get_invoice.assert_called_once()
+
+    def test_uses_balance_not_total_for_tap_charge(self, monkeypatch):
+        qbo, tap = _make_workflow_mocks(monkeypatch)
+        qbo.get_invoice.return_value = _qbo_invoice(balance=100.0, total=200.0)
+        result = process_invoice("42", qbo_client=qbo, tap_client=tap, settings=_settings())
+        assert isinstance(result, LinkResult)
+        assert result.amount == 100.0
+        tap.create_tap_invoice.assert_called_once()
+        assert tap.create_tap_invoice.call_args[0][0].amount == 100.0
+
+    def test_balance_change_regenerates_link(self, monkeypatch):
+        existing = {
+            "invoice_id": "42", "tap_charge_id": "inv_existing", "invoice_number": "1089",
+            "customer_name": "Al-Rashid", "amount": 200.0, "currency": "KWD",
+            "payment_url": "https://old.link", "qbo_note_updated": 1,
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+        deleted: list[str] = []
+        qbo, tap = _make_workflow_mocks(monkeypatch, existing_link=existing)
+        qbo.get_invoice.return_value = _qbo_invoice(balance=100.0, total=200.0)
+        tap.get_tap_invoice.return_value = {"id": "inv_existing", "status": "CREATED"}
+        monkeypatch.setattr(
+            db_module, "delete_by_invoice_id",
+            lambda inv_id: deleted.append(inv_id) or True,
+        )
+        result = process_invoice("42", qbo_client=qbo, tap_client=tap, settings=_settings())
+        assert isinstance(result, LinkResult)
+        assert result.status == "LINK_GENERATED"
+        assert result.amount == 100.0
+        assert deleted == ["42"]
+        tap.create_tap_invoice.assert_called_once()
 
     def test_stale_charge_regenerates_link(self, monkeypatch):
         existing = {

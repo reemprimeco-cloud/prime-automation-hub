@@ -100,7 +100,13 @@ def _handle_invoice_update(invoice_id: str, existing_link: dict) -> None:
         qbo = QuickBooksClient(settings=settings)
         invoice = qbo.get_invoice(invoice_id)
         old_amount = float(existing_link.get("amount", 0))
-        new_amount = float(invoice.get("TotalAmt", 0))
+        new_amount = float(invoice.get("Balance", 0))
+        if new_amount <= 0:
+            _LOG.info(
+                "qbo_invoice_update_already_paid",
+                extra={"invoice_id": invoice_id},
+            )
+            return
         if abs(new_amount - old_amount) < 0.001:
             _LOG.info(
                 "qbo_invoice_update_amount_unchanged",

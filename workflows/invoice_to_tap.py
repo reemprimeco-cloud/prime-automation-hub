@@ -163,16 +163,34 @@ def process_invoice(
     """
     _LOG.info("workflow_start", extra={"invoice_id": invoice_id})
 
-    # ── 1. Idempotency check ──────────────────────────────────────────────────
+    # ── 1. Fetch + validate invoice ───────────────────────────────────────────
+    invoice = qbo_client.get_invoice(invoice_id)
+    skip = _validate_invoice(invoice)
+    if skip:
+        return skip
+
+    amount_due = float(invoice.get("Balance", 0))
+
+    # ── 2. Idempotency check (regenerate when balance due changed) ────────────
     db.init_table()
     existing = db.get_by_invoice_id(invoice_id)
     if existing:
         tap_charge_id = existing["tap_charge_id"]
+        stored_amount = float(existing.get("amount", 0))
         try:
-            if _is_stale_tap_link(tap_client, tap_charge_id):
+            stale = _is_stale_tap_link(tap_client, tap_charge_id)
+            balance_changed = abs(amount_due - stored_amount) >= 0.001
+            if stale or balance_changed:
                 _LOG.info(
-                    "stale_link_regenerating",
-                    extra={"invoice_id": invoice_id, "tap_reference_id": tap_charge_id},
+                    "stale_link_regenerating" if stale else "balance_changed_regenerating",
+                    extra={
+                        "invoice_id": invoice_id,
+                        "tap_reference_id": tap_charge_id,
+                        "stored_amount": stored_amount,
+                        "amount_due": amount_due,
+                        "stale": stale,
+                        "balance_changed": balance_changed,
+                    },
                 )
                 db.delete_by_invoice_id(invoice_id)
             else:
@@ -192,14 +210,7 @@ def process_invoice(
             )
             return _existing_link_result(existing)
 
-    # ── 2. Fetch + validate invoice ───────────────────────────────────────────
-    invoice = qbo_client.get_invoice(invoice_id)
-    skip = _validate_invoice(invoice)
-    if skip:
-        return skip
-
     invoice_number  = str(invoice.get("DocNumber", invoice_id))
-    total_amt       = float(invoice.get("TotalAmt", 0))
     currency        = "KWD"          # hardcoded for this Kuwait deployment
     existing_note   = (invoice.get("PrivateNote") or "").strip()
     sync_token      = str(invoice.get("SyncToken", "0"))
@@ -222,7 +233,7 @@ def process_invoice(
                     wa_number,
                     customer_name=customer.display_name,
                     invoice_number=invoice_number,
-                    amount=total_amt,
+                    amount=amount_due,
                     currency=currency,
                     payment_url=bank_info,
                     invoice_link=invoice_link,
@@ -233,7 +244,7 @@ def process_invoice(
                         extra={"invoice_id": invoice_id, "to": wa_number},
                     )
                     whatsapp_client.send_admin_bank_notify(
-                        invoice_number, customer.display_name, total_amt, currency
+                        invoice_number, customer.display_name, amount_due, currency
                     )
                 else:
                     _LOG.warning(
@@ -255,7 +266,7 @@ def process_invoice(
         phone=_phone_for_tap(customer),
     )
     tap_request = CreateChargeRequest(
-        amount=total_amt,
+        amount=amount_due,
         currency=currency,
         description=f"Invoice #{invoice_number} — {customer.display_name}",
         customer=tap_customer,
@@ -280,7 +291,7 @@ def process_invoice(
         customer_id=qbo_customer_id,
         tap_charge_id=tap_invoice.id,
         payment_url=tap_invoice.url,
-        amount=total_amt,
+        amount=amount_due,
         currency=currency,
         invoice_number=invoice_number,
         customer_name=customer.display_name,
@@ -315,7 +326,7 @@ def process_invoice(
                 wa_number,
                 customer_name=customer.display_name,
                 invoice_number=invoice_number,
-                amount=total_amt,
+                amount=amount_due,
                 currency=currency,
                 payment_url=tap_invoice.url,
                 invoice_link=invoice_link,
@@ -327,7 +338,7 @@ def process_invoice(
                 wa_sent = True
                 wa_sid = msg.sid
                 whatsapp_client.send_admin_tap_notify(
-                    invoice_number, customer.display_name, total_amt, currency
+                    invoice_number, customer.display_name, amount_due, currency
                 )
             else:
                 db.mark_whatsapp_failed(invoice_id, error=msg.error)
@@ -353,7 +364,7 @@ def process_invoice(
         invoice_id=invoice_id,
         invoice_number=invoice_number,
         customer_name=customer.display_name,
-        amount=total_amt,
+        amount=amount_due,
         currency=currency,
         tap_charge_id=tap_invoice.id,
         payment_url=tap_invoice.url,
