@@ -23,7 +23,6 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from db.payment_links import bootstrap_links_from_file, init_table as init_payment_links_table
 from logging_config import get_logger
-from webhook.debug_trace import debug_trace
 from webhook.payload import parse_qbo_webhook_entities, payload_format_hint
 from webhook.storage import (
     count_all_events,
@@ -99,18 +98,30 @@ def _handle_invoice_update(invoice_id: str, existing_link: dict) -> None:
         settings = get_settings()
         qbo = QuickBooksClient(settings=settings)
         invoice = qbo.get_invoice(invoice_id)
+        total = float(invoice.get("TotalAmt", 0))
         old_amount = float(existing_link.get("amount", 0))
-        new_amount = float(invoice.get("Balance", 0))
-        if new_amount <= 0:
+        balance_due = float(invoice.get("Balance", 0))
+        partially_paid = balance_due < total - 0.001
+        link_covers_more_than_due = old_amount > balance_due + 0.001
+
+        if balance_due <= 0:
             _LOG.info(
                 "qbo_invoice_update_already_paid",
                 extra={"invoice_id": invoice_id},
             )
             return
-        if abs(new_amount - old_amount) < 0.001:
+        if (
+            abs(balance_due - old_amount) < 0.001
+            and not (partially_paid and link_covers_more_than_due)
+        ):
             _LOG.info(
                 "qbo_invoice_update_amount_unchanged",
-                extra={"invoice_id": invoice_id, "amount": old_amount},
+                extra={
+                    "invoice_id": invoice_id,
+                    "amount": old_amount,
+                    "balance_due": balance_due,
+                    "total": total,
+                },
             )
             return
         _LOG.info(
@@ -118,7 +129,9 @@ def _handle_invoice_update(invoice_id: str, existing_link: dict) -> None:
             extra={
                 "invoice_id": invoice_id,
                 "old_amount": old_amount,
-                "new_amount": new_amount,
+                "new_amount": balance_due,
+                "total": total,
+                "partially_paid": partially_paid,
             },
         )
         db.delete_by_invoice_id(invoice_id)
@@ -146,27 +159,10 @@ def _process_qbo_invoice(invoice_id: str) -> None:
     from messaging.whatsapp import whatsapp_client_from_settings
     from workflows.invoice_to_tap import process_invoice, LinkResult, SkipResult
 
-    # #region agent log
-    debug_trace(
-        "H7",
-        "webhook/server.py:_process_qbo_invoice:start",
-        "background processing started",
-        {"invoice_id": invoice_id, "max_attempts": len(_INVOICE_PROCESS_RETRY_DELAYS_SEC) + 1},
-    )
-    # #endregion
-
     max_attempts = len(_INVOICE_PROCESS_RETRY_DELAYS_SEC) + 1
     for attempt in range(max_attempts):
         if attempt > 0:
             delay = _INVOICE_PROCESS_RETRY_DELAYS_SEC[attempt - 1]
-            # #region agent log
-            debug_trace(
-                "H15",
-                "webhook/server.py:_process_qbo_invoice:retry_wait",
-                "waiting before invoice process retry",
-                {"invoice_id": invoice_id, "attempt": attempt + 1, "delay_sec": delay},
-            )
-            # #endregion
             time.sleep(delay)
 
         try:
@@ -186,14 +182,6 @@ def _process_qbo_invoice(invoice_id: str) -> None:
             )
 
             if isinstance(result, SkipResult):
-                # #region agent log
-                debug_trace(
-                    "H8",
-                    "webhook/server.py:_process_qbo_invoice:skipped",
-                    "invoice workflow skipped",
-                    {"invoice_id": invoice_id, "reason": result.reason, "attempt": attempt + 1},
-                )
-                # #endregion
                 _LOG.info(
                     "qbo_invoice_skipped",
                     extra={"invoice_id": invoice_id, "reason": result.reason},
@@ -201,19 +189,6 @@ def _process_qbo_invoice(invoice_id: str) -> None:
                 return
 
             if isinstance(result, LinkResult):
-                # #region agent log
-                debug_trace(
-                    "H7",
-                    "webhook/server.py:_process_qbo_invoice:success",
-                    "invoice workflow completed",
-                    {
-                        "invoice_id": invoice_id,
-                        "attempt": attempt + 1,
-                        "tap_charge_id": result.tap_charge_id,
-                        "whatsapp_sent": result.whatsapp_sent,
-                    },
-                )
-                # #endregion
                 _LOG.info(
                     "qbo_invoice_processed",
                     extra={
@@ -236,14 +211,6 @@ def _process_qbo_invoice(invoice_id: str) -> None:
                     },
                 )
                 continue
-            # #region agent log
-            debug_trace(
-                "H7",
-                "webhook/server.py:_process_qbo_invoice:qbo_error",
-                "invoice workflow failed",
-                {"invoice_id": invoice_id, "error": str(exc)[:200], "attempt": attempt + 1},
-            )
-            # #endregion
             _LOG.error(
                 "qbo_invoice_process_error",
                 extra={
@@ -254,19 +221,6 @@ def _process_qbo_invoice(invoice_id: str) -> None:
             )
             return
         except Exception as exc:
-            # #region agent log
-            debug_trace(
-                "H7",
-                "webhook/server.py:_process_qbo_invoice:error",
-                "invoice workflow failed",
-                {
-                    "invoice_id": invoice_id,
-                    "error": str(exc)[:200],
-                    "error_type": type(exc).__name__,
-                    "attempt": attempt + 1,
-                },
-            )
-            # #endregion
             _LOG.error(
                 "qbo_invoice_process_error",
                 extra={
@@ -289,53 +243,13 @@ async def receive_qbo_webhook(
     """Receive QBO change notification, verify, store, and process Invoice Creates."""
     payload_bytes: bytes = await request.body()
     verifier_token = os.getenv("QBO_WEBHOOK_VERIFIER_TOKEN", "").strip()
-    webhook_db_path = os.getenv("WEBHOOK_DB_PATH", "webhook_events.db")
-
-    # #region agent log
-    debug_trace(
-        "H4",
-        "webhook/server.py:receive_qbo_webhook:entry",
-        "webhook POST received",
-        {
-            "payload_length": len(payload_bytes),
-            "has_signature": bool(intuit_signature),
-            "signature_length": len(intuit_signature or ""),
-            "webhook_db_path": webhook_db_path,
-            "client_host": request.client.host if request.client else "",
-        },
-    )
-    # #endregion
 
     if not verifier_token:
         raise HTTPException(status_code=500, detail="QBO_WEBHOOK_VERIFIER_TOKEN not set")
 
-    _LOG.info("webhook_debug", extra={
-        "signature_received": intuit_signature or "",
-        "signature_length": len(intuit_signature or ""),
-        "payload_length": len(payload_bytes),
-    })
-    _LOG.warning(f"qbo_signature_debug received={intuit_signature!r} token_len={len(verifier_token)}")
-
     if not verify_signature(payload_bytes, intuit_signature or "", verifier_token):
-        # #region agent log
-        debug_trace(
-            "H5",
-            "webhook/server.py:receive_qbo_webhook:signature",
-            "signature verification failed",
-            {"payload_length": len(payload_bytes)},
-        )
-        # #endregion
         _LOG.warning("qbo_webhook_invalid_signature")
         raise HTTPException(status_code=401, detail="Invalid intuit-signature")
-
-    # #region agent log
-    debug_trace(
-        "H5",
-        "webhook/server.py:receive_qbo_webhook:signature",
-        "signature verification passed",
-        {"payload_length": len(payload_bytes)},
-    )
-    # #endregion
 
     try:
         payload = json.loads(payload_bytes)
@@ -344,21 +258,6 @@ async def receive_qbo_webhook(
 
     events_stored = store_webhook_payload(payload, payload_bytes.decode("utf-8"))
     parsed_entities = parse_qbo_webhook_entities(payload)
-
-    # #region agent log
-    debug_trace(
-        "H1",
-        "webhook/server.py:receive_qbo_webhook:parsed",
-        "payload parsed",
-        {
-            "format": payload_format_hint(payload),
-            "parsed_entity_count": len(parsed_entities),
-            "events_stored": events_stored,
-            "webhook_db_path": webhook_db_path,
-            "top_level_keys": sorted(payload.keys())[:8] if isinstance(payload, dict) else [],
-        },
-    )
-    # #endregion
 
     # ── auto-process Invoice Create / Update (no link yet) ────────────────────
     invoice_ids_to_process: list[str] = []
@@ -392,19 +291,6 @@ async def receive_qbo_webhook(
     for invoice_id in dict.fromkeys(invoice_ids_to_process):
         _LOG.info("qbo_invoice_create_detected", extra={"invoice_id": invoice_id})
         background_tasks.add_task(_process_qbo_invoice, invoice_id)
-
-    # #region agent log
-    debug_trace(
-        "H1",
-        "webhook/server.py:receive_qbo_webhook:exit",
-        "webhook handled",
-        {
-            "events_stored": events_stored,
-            "invoices_queued": len(invoice_ids_to_process),
-            "health_count_after": count_all_events(),
-        },
-    )
-    # #endregion
 
     _LOG.info("qbo_webhook_received",
               extra={"events_stored": events_stored,
@@ -718,20 +604,6 @@ async def health() -> dict:
     qbo_events_stored = count_all_events()
     last_qbo_webhook_at = get_last_webhook_received_at()
     webhook_db_path = os.getenv("WEBHOOK_DB_PATH", "webhook_events.db")
-
-    # #region agent log
-    debug_trace(
-        "H2",
-        "webhook/server.py:health",
-        "health check read webhook db",
-        {
-            "qbo_events_stored": qbo_events_stored,
-            "webhook_db_path": webhook_db_path,
-            "db_exists": os.path.exists(webhook_db_path),
-            "last_qbo_webhook_at": last_qbo_webhook_at,
-        },
-    )
-    # #endregion
 
     return {
         "status": "healthy",

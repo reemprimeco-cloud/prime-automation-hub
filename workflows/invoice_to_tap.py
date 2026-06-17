@@ -170,6 +170,7 @@ def process_invoice(
         return skip
 
     amount_due = float(invoice.get("Balance", 0))
+    total_amt = float(invoice.get("TotalAmt", 0))
 
     # ── 2. Idempotency check (regenerate when balance due changed) ────────────
     db.init_table()
@@ -180,16 +181,32 @@ def process_invoice(
         try:
             stale = _is_stale_tap_link(tap_client, tap_charge_id)
             balance_changed = abs(amount_due - stored_amount) >= 0.001
-            if stale or balance_changed:
+            partially_paid = amount_due < total_amt - 0.001
+            link_covers_more_than_due = stored_amount > amount_due + 0.001
+            needs_regen = (
+                stale
+                or balance_changed
+                or (partially_paid and link_covers_more_than_due)
+            )
+            if needs_regen:
+                reason = (
+                    "stale_link_regenerating"
+                    if stale
+                    else "balance_changed_regenerating"
+                    if balance_changed
+                    else "partial_payment_regenerating"
+                )
                 _LOG.info(
-                    "stale_link_regenerating" if stale else "balance_changed_regenerating",
+                    reason,
                     extra={
                         "invoice_id": invoice_id,
                         "tap_reference_id": tap_charge_id,
                         "stored_amount": stored_amount,
                         "amount_due": amount_due,
+                        "total_amt": total_amt,
                         "stale": stale,
                         "balance_changed": balance_changed,
+                        "partially_paid": partially_paid,
                     },
                 )
                 db.delete_by_invoice_id(invoice_id)
@@ -357,6 +374,8 @@ def process_invoice(
             "tap_charge_id": tap_invoice.id,
             "qbo_updated": qbo_updated,
             "whatsapp_sent": wa_sent,
+            "amount_due": amount_due,
+            "total_amt": total_amt,
         },
     )
 
