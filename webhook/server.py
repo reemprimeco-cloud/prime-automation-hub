@@ -125,6 +125,7 @@ async def receive_qbo_webhook(
         "signature_length": len(intuit_signature or ""),
         "payload_length": len(payload_bytes),
     })
+    _LOG.warning(f"qbo_signature_debug received={intuit_signature!r} token_len={len(verifier_token)}")
 
     if not verify_signature(payload_bytes, intuit_signature or "", verifier_token):
         _LOG.warning("qbo_webhook_invalid_signature")
