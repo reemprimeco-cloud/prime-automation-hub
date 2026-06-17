@@ -41,11 +41,14 @@ def main() -> None:
         "\nRender must also use Production keys + Production webhook verifier:\n"
         "  QBO_WEBHOOK_VERIFIER_TOKEN=a112e073-d767-4ee2-a6ac-385585fbc12d\n"
         "  (NOT d839fdc2-... which is Development)\n"
-        "\nIntuit Production webhook URL (either works):\n"
+        "\nIntuit Production webhook URL:\n"
         "  https://prime-automation-hub.onrender.com/webhook\n"
-        "  https://prime-qbo-webhook.netlify.app/quickbooks-webhook\n"
-        "Subscribe to Invoice Create/Update. After creating an invoice, /health should show\n"
-        "qbo_webhook_events_stored > 0.\n"
+        "\nIn Intuit Production → Webhooks you must also:\n"
+        "  1. Click 'Show webhooks' (or similar) and enable Invoice Create/Update\n"
+        "  2. Click Save\n"
+        "  3. Wait up to 5 minutes after creating an invoice (Intuit batches events)\n"
+        "\nSelf-test on Render Shell (proves token + code path):\n"
+        "  python3 -m scripts.test_qbo_webhook\n"
     )
 
 
