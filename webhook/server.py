@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from html import escape
 from pathlib import Path
 from typing import Optional
@@ -73,52 +74,164 @@ async def _startup() -> None:
 
 # ── QBO invoice processor (background task) ───────────────────────────────────
 
+_INVOICE_PROCESS_RETRY_DELAYS_SEC = (3, 10, 30)
+
+
+def _should_retry_invoice_process(exc: Exception) -> bool:
+    """Retry when QBO may not have the new invoice readable yet (webhook race)."""
+    from qbo.client import QBOError
+
+    if not isinstance(exc, QBOError):
+        return False
+    msg = str(exc).lower()
+    return any(
+        token in msg
+        for token in ("404", "not found", "object not found", "business validation")
+    )
+
+
 def _process_qbo_invoice(invoice_id: str) -> None:
     """Run the full invoice → Tap link → WhatsApp workflow in the background.
 
     Called when QBO fires an Invoice Create event. Runs after the webhook
     has already returned 200 to Intuit, so processing time doesn't matter.
+    Retries with backoff when QBO has not propagated the invoice yet.
     """
-    try:
-        from config import get_settings
-        from qbo.client import QuickBooksClient
-        from tap.client import tap_client_from_settings
-        from messaging.whatsapp import whatsapp_client_from_settings
-        from workflows.invoice_to_tap import process_invoice, LinkResult, SkipResult
+    from qbo.client import QBOError, QuickBooksClient
+    from tap.client import tap_client_from_settings
+    from messaging.whatsapp import whatsapp_client_from_settings
+    from workflows.invoice_to_tap import process_invoice, LinkResult, SkipResult
 
-        settings  = get_settings()
-        qbo       = QuickBooksClient(settings=settings)
-        tap       = tap_client_from_settings(settings)
-        whatsapp  = whatsapp_client_from_settings(settings)
+    # #region agent log
+    debug_trace(
+        "H7",
+        "webhook/server.py:_process_qbo_invoice:start",
+        "background processing started",
+        {"invoice_id": invoice_id, "max_attempts": len(_INVOICE_PROCESS_RETRY_DELAYS_SEC) + 1},
+    )
+    # #endregion
 
-        result = process_invoice(
-            invoice_id,
-            qbo_client=qbo,
-            tap_client=tap,
-            whatsapp_client=whatsapp,
-            settings=settings,
-        )
+    max_attempts = len(_INVOICE_PROCESS_RETRY_DELAYS_SEC) + 1
+    for attempt in range(max_attempts):
+        if attempt > 0:
+            delay = _INVOICE_PROCESS_RETRY_DELAYS_SEC[attempt - 1]
+            # #region agent log
+            debug_trace(
+                "H15",
+                "webhook/server.py:_process_qbo_invoice:retry_wait",
+                "waiting before invoice process retry",
+                {"invoice_id": invoice_id, "attempt": attempt + 1, "delay_sec": delay},
+            )
+            # #endregion
+            time.sleep(delay)
 
-        if isinstance(result, SkipResult):
-            _LOG.info("qbo_invoice_skipped",
-                      extra={"invoice_id": invoice_id, "reason": result.reason})
-        elif isinstance(result, LinkResult):
-            _LOG.info("qbo_invoice_processed",
-                      extra={
-                          "invoice_id": invoice_id,
-                          "tap_charge_id": result.tap_charge_id,
-                          "whatsapp_sent": result.whatsapp_sent,
-                          "status": result.status,
-                      })
-    except Exception as exc:
-        _LOG.error(
-            "qbo_invoice_process_error",
-            extra={
-                "invoice_id": invoice_id,
-                "error": str(exc),
-                "error_type": type(exc).__name__,
-            },
-        )
+        try:
+            from config import get_settings
+
+            settings = get_settings()
+            qbo = QuickBooksClient(settings=settings)
+            tap = tap_client_from_settings(settings)
+            whatsapp = whatsapp_client_from_settings(settings)
+
+            result = process_invoice(
+                invoice_id,
+                qbo_client=qbo,
+                tap_client=tap,
+                whatsapp_client=whatsapp,
+                settings=settings,
+            )
+
+            if isinstance(result, SkipResult):
+                # #region agent log
+                debug_trace(
+                    "H8",
+                    "webhook/server.py:_process_qbo_invoice:skipped",
+                    "invoice workflow skipped",
+                    {"invoice_id": invoice_id, "reason": result.reason, "attempt": attempt + 1},
+                )
+                # #endregion
+                _LOG.info(
+                    "qbo_invoice_skipped",
+                    extra={"invoice_id": invoice_id, "reason": result.reason},
+                )
+                return
+
+            if isinstance(result, LinkResult):
+                # #region agent log
+                debug_trace(
+                    "H7",
+                    "webhook/server.py:_process_qbo_invoice:success",
+                    "invoice workflow completed",
+                    {
+                        "invoice_id": invoice_id,
+                        "attempt": attempt + 1,
+                        "tap_charge_id": result.tap_charge_id,
+                        "whatsapp_sent": result.whatsapp_sent,
+                    },
+                )
+                # #endregion
+                _LOG.info(
+                    "qbo_invoice_processed",
+                    extra={
+                        "invoice_id": invoice_id,
+                        "tap_charge_id": result.tap_charge_id,
+                        "whatsapp_sent": result.whatsapp_sent,
+                        "status": result.status,
+                    },
+                )
+                return
+
+        except QBOError as exc:
+            if attempt + 1 < max_attempts and _should_retry_invoice_process(exc):
+                _LOG.warning(
+                    "qbo_invoice_process_retry",
+                    extra={
+                        "invoice_id": invoice_id,
+                        "attempt": attempt + 1,
+                        "error": str(exc)[:200],
+                    },
+                )
+                continue
+            # #region agent log
+            debug_trace(
+                "H7",
+                "webhook/server.py:_process_qbo_invoice:qbo_error",
+                "invoice workflow failed",
+                {"invoice_id": invoice_id, "error": str(exc)[:200], "attempt": attempt + 1},
+            )
+            # #endregion
+            _LOG.error(
+                "qbo_invoice_process_error",
+                extra={
+                    "invoice_id": invoice_id,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return
+        except Exception as exc:
+            # #region agent log
+            debug_trace(
+                "H7",
+                "webhook/server.py:_process_qbo_invoice:error",
+                "invoice workflow failed",
+                {
+                    "invoice_id": invoice_id,
+                    "error": str(exc)[:200],
+                    "error_type": type(exc).__name__,
+                    "attempt": attempt + 1,
+                },
+            )
+            # #endregion
+            _LOG.error(
+                "qbo_invoice_process_error",
+                extra={
+                    "invoice_id": invoice_id,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return
 
 
 # ── QBO webhook ───────────────────────────────────────────────────────────────
@@ -227,7 +340,7 @@ async def receive_qbo_webhook(
             extra={"format": payload_format_hint(payload)},
         )
 
-    for invoice_id in invoice_ids_to_process:
+    for invoice_id in dict.fromkeys(invoice_ids_to_process):
         _LOG.info("qbo_invoice_create_detected", extra={"invoice_id": invoice_id})
         background_tasks.add_task(_process_qbo_invoice, invoice_id)
 
