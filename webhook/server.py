@@ -90,6 +90,44 @@ def _should_retry_invoice_process(exc: Exception) -> bool:
     )
 
 
+def _handle_invoice_update(invoice_id: str, existing_link: dict) -> None:
+    try:
+        from config import get_settings
+        from db import payment_links as db
+        from qbo.client import QuickBooksClient
+
+        settings = get_settings()
+        qbo = QuickBooksClient(settings=settings)
+        invoice = qbo.get_invoice(invoice_id)
+        old_amount = float(existing_link.get("amount", 0))
+        new_amount = float(invoice.get("TotalAmt", 0))
+        if abs(new_amount - old_amount) < 0.001:
+            _LOG.info(
+                "qbo_invoice_update_amount_unchanged",
+                extra={"invoice_id": invoice_id, "amount": old_amount},
+            )
+            return
+        _LOG.info(
+            "qbo_invoice_update_amount_changed",
+            extra={
+                "invoice_id": invoice_id,
+                "old_amount": old_amount,
+                "new_amount": new_amount,
+            },
+        )
+        db.delete_by_invoice_id(invoice_id)
+        _process_qbo_invoice(invoice_id)
+    except Exception as exc:
+        _LOG.error(
+            "qbo_invoice_update_check_error",
+            extra={
+                "invoice_id": invoice_id,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            },
+        )
+
+
 def _process_qbo_invoice(invoice_id: str) -> None:
     """Run the full invoice → Tap link → WhatsApp workflow in the background.
 
@@ -331,8 +369,13 @@ async def receive_qbo_webhook(
             from db import payment_links as db
 
             db.init_table()
-            if db.get_by_invoice_id(invoice_id) is None:
+            existing_link = db.get_by_invoice_id(invoice_id)
+            if existing_link is None:
                 invoice_ids_to_process.append(invoice_id)
+            else:
+                background_tasks.add_task(
+                    _handle_invoice_update, invoice_id, existing_link
+                )
 
     if not events_stored and payload:
         _LOG.warning(
