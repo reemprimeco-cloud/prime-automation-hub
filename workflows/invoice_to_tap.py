@@ -54,7 +54,7 @@ class LinkResult:
 class SkipResult:
     """Returned when the invoice should not get a payment link."""
     invoice_id: str
-    reason: str               # "ALREADY_PAID" | "VOIDED" | "BANK_TRANSFER"
+    reason: str               # "ALREADY_PAID" | "VOIDED" | "BANK_TRANSFER" | "MISSING_PHONE"
     detail: str = ""
 
 
@@ -274,13 +274,37 @@ def process_invoice(
             detail="Customer prefers bank transfer — no Tap link generated.",
         )
 
+    tap_phone = _phone_for_tap(customer)
+    if not tap_phone.number:
+        _LOG.error(
+            "missing_customer_phone",
+            extra={
+                "invoice_id": invoice_id,
+                "invoice_number": invoice_number,
+                "customer_id": qbo_customer_id,
+                "customer_name": customer.display_name,
+            },
+        )
+        if whatsapp_client is not None:
+            whatsapp_client.send_admin_missing_phone_alert(
+                invoice_number, customer.display_name
+            )
+        return SkipResult(
+            invoice_id=invoice_id,
+            reason="MISSING_PHONE",
+            detail=(
+                f"Customer '{customer.display_name}' has no valid Kuwait mobile "
+                "number in QBO — payment link not generated."
+            ),
+        )
+
     # ── 4. Build Tap request ──────────────────────────────────────────────────
     first, last = _split_name(customer.display_name or customer_display_name)
     tap_customer = TapCustomer(
         first_name=first,
         last_name=last,
         email=customer.email or "",
-        phone=_phone_for_tap(customer),
+        phone=tap_phone,
     )
     tap_request = CreateChargeRequest(
         amount=amount_due,
@@ -336,34 +360,27 @@ def process_invoice(
     wa_sid = ""
 
     if whatsapp_client is not None:
-        phone = _phone_for_tap(customer)
-        if phone.number:
-            wa_number = f"+{phone.country_code}{phone.number}"
-            msg = whatsapp_client.send_payment_link(
-                wa_number,
-                customer_name=customer.display_name,
-                invoice_number=invoice_number,
-                amount=amount_due,
-                currency=currency,
-                payment_url=tap_invoice.url,
-                invoice_link=invoice_link,
+        wa_number = f"+{tap_phone.country_code}{tap_phone.number}"
+        msg = whatsapp_client.send_payment_link(
+            wa_number,
+            customer_name=customer.display_name,
+            invoice_number=invoice_number,
+            amount=amount_due,
+            currency=currency,
+            payment_url=tap_invoice.url,
+            invoice_link=invoice_link,
+        )
+        if msg.sent:
+            db.mark_whatsapp_sent(
+                invoice_id, message_sid=msg.sid, to_number=wa_number
             )
-            if msg.sent:
-                db.mark_whatsapp_sent(
-                    invoice_id, message_sid=msg.sid, to_number=wa_number
-                )
-                wa_sent = True
-                wa_sid = msg.sid
-                whatsapp_client.send_admin_tap_notify(
-                    invoice_number, customer.display_name, amount_due, currency
-                )
-            else:
-                db.mark_whatsapp_failed(invoice_id, error=msg.error)
+            wa_sent = True
+            wa_sid = msg.sid
+            whatsapp_client.send_admin_tap_notify(
+                invoice_number, customer.display_name, amount_due, currency
+            )
         else:
-            _LOG.warning(
-                "whatsapp_skipped_no_mobile",
-                extra={"invoice_id": invoice_id, "customer_id": qbo_customer_id},
-            )
+            db.mark_whatsapp_failed(invoice_id, error=msg.error)
     else:
         _LOG.debug("whatsapp_skipped_no_client", extra={"invoice_id": invoice_id})
 

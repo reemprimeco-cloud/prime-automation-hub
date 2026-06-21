@@ -51,6 +51,7 @@ class Settings:
     bank_transfer_info: str = ""  # shown in WhatsApp for BANK_TRANSFER customers
     twilio_admin_tap_sid: str = ""
     twilio_admin_bank_sid: str = ""
+    twilio_admin_missing_phone_sid: str = ""
     twilio_admin_phone: str = ""
     qbo_bank_payment_method_id: str | None = None
 
@@ -101,6 +102,9 @@ def get_settings() -> Settings:
         bank_transfer_info=os.getenv("BANK_TRANSFER_INFO", "").strip(),
         twilio_admin_tap_sid=os.getenv("TWILIO_ADMIN_TAP_SID", "").strip(),
         twilio_admin_bank_sid=os.getenv("TWILIO_ADMIN_BANK_SID", "").strip(),
+        twilio_admin_missing_phone_sid=os.getenv(
+            "TWILIO_ADMIN_MISSING_PHONE_CONTENT_SID", ""
+        ).strip(),
         twilio_admin_phone=os.getenv("TWILIO_ADMIN_PHONE", "").strip(),
         qbo_bank_payment_method_id=(
             os.getenv("QBO_BANK_PAYMENT_METHOD_ID", "").strip() or None

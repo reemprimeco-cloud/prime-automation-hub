@@ -27,6 +27,10 @@ Admin bank notify (3 vars) — prime_admin_bank_notify_2:
   {{1}} invoice number
   {{2}} customer name
   {{3}} amount  e.g. "48.000 KWD"
+
+Admin missing phone alert (2 vars):
+  {{1}} invoice number
+  {{2}} customer name
 """
 from __future__ import annotations
 
@@ -62,6 +66,7 @@ class WhatsAppClient:
         confirmation_content_sid: str = "",
         admin_tap_sid: str = "",
         admin_bank_sid: str = "",
+        admin_missing_phone_sid: str = "",
         admin_phone: str = "",
     ) -> None:
         if not all([account_sid, auth_token, from_number, content_sid]):
@@ -75,6 +80,7 @@ class WhatsAppClient:
         self._confirmation_content_sid = confirmation_content_sid or content_sid
         self._admin_tap_sid = admin_tap_sid
         self._admin_bank_sid = admin_bank_sid
+        self._admin_missing_phone_sid = admin_missing_phone_sid
         self._admin_phone = admin_phone
 
     # ── payment link ──────────────────────────────────────────────────────────
@@ -173,6 +179,26 @@ class WhatsAppClient:
         )
         return self._send(self._admin_phone, self._admin_bank_sid, variables)
 
+    def send_admin_missing_phone_alert(
+        self,
+        invoice_number: str,
+        customer_name: str,
+    ) -> MessageResult:
+        """Notify admin that a customer has no valid Kuwait mobile in QBO."""
+        if not self._admin_phone or not self._admin_missing_phone_sid:
+            return MessageResult(
+                to=self._admin_phone or "", error="admin missing phone not configured"
+            )
+        variables = {
+            "1": invoice_number,
+            "2": customer_name,
+        }
+        _LOG.info(
+            "whatsapp_admin_missing_phone_alert_attempt",
+            extra={"invoice": invoice_number, "customer": customer_name},
+        )
+        return self._send(self._admin_phone, self._admin_missing_phone_sid, variables)
+
     def send_text(self, to_number: str, body: str) -> MessageResult:
         """Send a plain-text WhatsApp message (admin replies)."""
         to = f"whatsapp:{to_number}"
@@ -228,5 +254,6 @@ def whatsapp_client_from_settings(settings) -> WhatsAppClient | None:
         confirmation_content_sid=settings.twilio_confirmation_content_sid,
         admin_tap_sid=settings.twilio_admin_tap_sid,
         admin_bank_sid=settings.twilio_admin_bank_sid,
+        admin_missing_phone_sid=settings.twilio_admin_missing_phone_sid,
         admin_phone=settings.twilio_admin_phone,
     )

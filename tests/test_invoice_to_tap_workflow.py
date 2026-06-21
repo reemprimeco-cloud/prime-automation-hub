@@ -325,6 +325,33 @@ class TestProcessInvoice:
         assert result.reason == "BANK_TRANSFER"
         tap.create_tap_invoice.assert_not_called()
 
+    def test_missing_phone_returns_skip_result_and_alerts_admin(self, monkeypatch):
+        from qbo.models import Customer
+        from messaging.whatsapp import MessageResult
+
+        qbo, tap = _make_workflow_mocks(monkeypatch)
+        qbo.get_customer_by_id.return_value = Customer(
+            id="99", display_name="Ahmed Al-Rashid",
+            email="ahmed@example.com",
+            phone="+96524001234",
+            mobile="",
+            alternate_phone="",
+        )
+        wa = MagicMock()
+        wa.send_admin_missing_phone_alert.return_value = MessageResult(
+            to="+96550655856", sid="SM_missing", status="queued"
+        )
+        result = process_invoice(
+            "42", qbo_client=qbo, tap_client=tap, whatsapp_client=wa, settings=_settings()
+        )
+        assert isinstance(result, SkipResult)
+        assert result.reason == "MISSING_PHONE"
+        assert "no valid Kuwait mobile" in result.detail
+        tap.create_tap_invoice.assert_not_called()
+        wa.send_admin_missing_phone_alert.assert_called_once_with(
+            "1089", "Ahmed Al-Rashid"
+        )
+
     def test_qbo_update_failure_does_not_fail_workflow(self, monkeypatch):
         """Even if QBO PrivateNote update fails, the DB record is saved and result is returned."""
         from qbo.client import QBOError

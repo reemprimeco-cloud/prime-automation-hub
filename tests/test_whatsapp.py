@@ -344,3 +344,25 @@ def test_send_admin_bank_notify_uses_bank_template():
         assert kwargs["content_sid"] == "HXadmin_bank"
         variables = json.loads(kwargs["content_variables"])
         assert variables["1"] == "2537"
+
+
+def test_send_admin_missing_phone_alert_uses_missing_phone_template():
+    import json
+    from unittest.mock import MagicMock, patch
+    with patch("twilio.rest.Client") as MockClient:
+        mock_instance = MockClient.return_value
+        mock_instance.messages.create.return_value = MagicMock(sid="SM_admin", status="queued")
+        client = WhatsAppClient(
+            "AC", "auth", "+96565000000", "HXtest",
+            admin_missing_phone_sid="HXadmin_missing_phone",
+            admin_phone="+96550655856",
+        )
+        result = client.send_admin_missing_phone_alert("2537", "Coded")
+        assert result.sent is True
+        kwargs = mock_instance.messages.create.call_args.kwargs
+        assert kwargs["content_sid"] == "HXadmin_missing_phone"
+        assert kwargs["to"] == "whatsapp:+96550655856"
+        variables = json.loads(kwargs["content_variables"])
+        assert variables["1"] == "2537"
+        assert variables["2"] == "Coded"
+        assert "3" not in variables
