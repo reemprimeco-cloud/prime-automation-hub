@@ -242,11 +242,103 @@ def test_oauth_callback_error_page(web_client):
     assert "authorization failed" in resp.text.lower()
 
 
-def test_payment_success_page(web_client):
+def test_payment_success_page_without_id_is_unknown(web_client):
+    """Bare /payment/success must NOT claim success (no verified status)."""
     resp = web_client.get("/payment/success")
     assert resp.status_code == 200
     assert "text/html" in resp.headers["content-type"]
+    assert "Payment successful" not in resp.text
+    assert "confirming your payment" in resp.text.lower()
+
+
+def test_payment_success_page_canceled_charge_not_success(web_client, monkeypatch):
+    """Canceled / not-captured charges must never show Payment successful."""
+
+    class _FakeUP:
+        def get_charge_status(self, charge_id: str):
+            assert charge_id == "track_canceled_1"
+            return {
+                "status": True,
+                "data": {
+                    "transaction": {
+                        "result": "CANCELED",
+                        "track_id": charge_id,
+                    }
+                },
+            }
+
+    monkeypatch.setattr(
+        "upayments.client.upayments_client_from_env",
+        lambda **kw: _FakeUP(),
+    )
+
+    resp = web_client.get("/payment/success?track_id=track_canceled_1")
+    assert resp.status_code == 200
+    assert "Payment successful" not in resp.text
+    assert "Payment not completed" in resp.text
+    assert "wa.me/96565068000" in resp.text
+
+
+def test_payment_success_page_not_captured_not_success(web_client, monkeypatch):
+    class _FakeUP:
+        def get_charge_status(self, charge_id: str):
+            return {"data": {"transaction": {"result": "NOT CAPTURED"}}}
+
+    monkeypatch.setattr(
+        "upayments.client.upayments_client_from_env",
+        lambda **kw: _FakeUP(),
+    )
+    resp = web_client.get("/payment/success?track_id=track_fail")
+    assert resp.status_code == 200
+    assert "Payment successful" not in resp.text
+    assert "Payment not completed" in resp.text
+
+
+def test_payment_success_page_captured_shows_success(web_client, monkeypatch):
+    class _FakeUP:
+        def get_charge_status(self, charge_id: str):
+            return {"data": {"transaction": {"result": "CAPTURED"}}}
+
+    monkeypatch.setattr(
+        "upayments.client.upayments_client_from_env",
+        lambda **kw: _FakeUP(),
+    )
+    resp = web_client.get("/payment/success?track_id=track_ok")
+    assert resp.status_code == 200
     assert "Payment successful" in resp.text
+
+
+def test_payment_success_page_pending_is_unknown(web_client, monkeypatch):
+    class _FakeUP:
+        def get_charge_status(self, charge_id: str):
+            return {"data": {"transaction": {"result": "PENDING"}}}
+
+    monkeypatch.setattr(
+        "upayments.client.upayments_client_from_env",
+        lambda **kw: _FakeUP(),
+    )
+    resp = web_client.get("/payment/success?track_id=track_pending")
+    assert resp.status_code == 200
+    assert "Payment successful" not in resp.text
+    assert "Payment not completed" not in resp.text
+    assert "confirming your payment" in resp.text.lower()
+
+
+def test_payment_success_page_api_error_is_unknown(web_client, monkeypatch):
+    from upayments.exceptions import UPaymentsAPIError
+
+    class _FakeUP:
+        def get_charge_status(self, charge_id: str):
+            raise UPaymentsAPIError("upstream down", status_code=503)
+
+    monkeypatch.setattr(
+        "upayments.client.upayments_client_from_env",
+        lambda **kw: _FakeUP(),
+    )
+    resp = web_client.get("/payment/success?session_id=sess_x")
+    assert resp.status_code == 200
+    assert "Payment successful" not in resp.text
+    assert "confirming your payment" in resp.text.lower()
 
 
 def test_invoice_pdf_endpoint_returns_pdf(web_client, monkeypatch):
