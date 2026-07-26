@@ -1,0 +1,163 @@
+"""Offline unit tests for the UPayments client (no live sandbox calls)."""
+from __future__ import annotations
+
+import hashlib
+import hmac
+from unittest.mock import MagicMock
+
+import pytest
+
+from upayments.client import UPaymentsClient, _normalize_customer_name, _normalize_phone
+from upayments.exceptions import UPaymentsAPIError
+
+
+@pytest.fixture()
+def client() -> UPaymentsClient:
+    return UPaymentsClient(
+        api_key="test-key",
+        merchant_id="78508",
+        base_url="https://sandboxapi.upayments.com/api/v1",
+        return_url="https://example.com/success",
+        cancel_url="https://example.com/cancel",
+        notification_url="https://example.com/notify",
+        webhook_secret="whsec_test",
+    )
+
+
+def test_normalize_customer_name_preserves_short_names():
+    # No 3-character minimum — single-letter / short names are OK for UPayments
+    assert _normalize_customer_name("Al") == "Al"
+    assert _normalize_customer_name("A") == "A"
+    assert _normalize_customer_name("") == "Customer"
+    assert _normalize_customer_name("  ") == "Customer"
+
+
+def test_normalize_phone_e164():
+    assert _normalize_phone("+965 50-123-456") == "+96550123456"
+    assert _normalize_phone("96550123456") == "+96550123456"
+    assert _normalize_phone("") == ""
+
+
+def test_create_charge_posts_expected_body(client: UPaymentsClient, monkeypatch):
+    captured = {}
+
+    def fake_request(method, url, json=None, timeout=None):
+        captured["method"] = method
+        captured["url"] = url
+        captured["json"] = json
+        resp = MagicMock()
+        resp.ok = True
+        resp.status_code = 201
+        resp.text = "{}"
+        resp.json.return_value = {
+            "status": True,
+            "data": {
+                "link": "https://sandbox.upayments.com/pay/abc",
+                "track_id": "track_abc",
+                "amount": 1.0,
+                "currency": "KWD",
+            },
+        }
+        return resp
+
+    monkeypatch.setattr(client._session, "request", fake_request)
+
+    result = client.create_charge(
+        amount=1.0,
+        currency="KWD",
+        customer_name="Al",  # short name — must not fail
+        customer_phone="+96550123456",
+        invoice_number="2555",
+        description="Invoice #2555",
+    )
+
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/charge")
+    body = captured["json"]
+    assert body["order"]["amount"] == 1.0
+    assert body["order"]["currency"] == "KWD"
+    assert body["order"]["id"] == "2555"
+    assert body["customer"]["name"] == "Al"
+    assert body["customer"]["mobile"] == "+96550123456"
+    assert body["notificationUrl"] == "https://example.com/notify"
+    assert result["payment_url"] == "https://sandbox.upayments.com/pay/abc"
+    assert result["charge_id"] == "track_abc"
+    assert result["provider"] == "upayments"
+
+
+def test_create_charge_raises_on_http_error(client: UPaymentsClient, monkeypatch):
+    def fake_request(method, url, json=None, timeout=None):
+        resp = MagicMock()
+        resp.ok = False
+        resp.status_code = 401
+        resp.text = '{"message":"Unauthenticated"}'
+        resp.json.return_value = {"message": "Unauthenticated"}
+        return resp
+
+    monkeypatch.setattr(client._session, "request", fake_request)
+
+    with pytest.raises(UPaymentsAPIError) as exc_info:
+        client.create_charge(
+            1.0, "KWD", "Test", "+96550000000", "1", "desc"
+        )
+    assert exc_info.value.status_code == 401
+    assert "401" in str(exc_info.value)
+
+
+def test_get_charge_status(client: UPaymentsClient, monkeypatch):
+    def fake_request(method, url, json=None, timeout=None):
+        resp = MagicMock()
+        resp.ok = True
+        resp.status_code = 200
+        resp.text = "{}"
+        resp.json.return_value = {
+            "status": True,
+            "data": {"result": "CAPTURED", "track_id": "t1"},
+        }
+        return resp
+
+    monkeypatch.setattr(client._session, "request", fake_request)
+    data = client.get_charge_status("t1")
+    assert data["data"]["result"] == "CAPTURED"
+
+
+def test_parse_webhook_event_paid(client: UPaymentsClient):
+    event = client.parse_webhook_event({
+        "payment_id": "1004",
+        "result": "CAPTURED",
+        "track_id": "track_1",
+        "requested_order_id": "2555",
+        "amount": "12.500",
+        "currency": "KWD",
+    })
+    assert event.status == "paid"
+    assert event.invoice_number == "2555"
+    assert event.provider_transaction_id == "track_1"
+    assert event.amount == 12.5
+
+
+def test_parse_webhook_event_failed(client: UPaymentsClient):
+    event = client.parse_webhook_event({
+        "result": "NOT CAPTURED",
+        "track_id": "track_2",
+        "requested_order_id": "2556",
+    })
+    assert event.status == "failed"
+
+
+def test_verify_webhook_signature_hmac(client: UPaymentsClient):
+    payload = b'{"result":"CAPTURED"}'
+    digest = hmac.new(b"whsec_test", payload, hashlib.sha256).hexdigest()
+    assert client.verify_webhook_signature(payload, digest) is True
+    assert client.verify_webhook_signature(payload, f"sha256={digest}") is True
+    assert client.verify_webhook_signature(payload, "deadbeef") is False
+
+
+def test_verify_webhook_signature_no_secret_allows_empty_header():
+    c = UPaymentsClient(
+        api_key="k",
+        merchant_id="78508",
+        webhook_secret="",
+    )
+    assert c.verify_webhook_signature(b"{}", "") is True
+    assert c.verify_webhook_signature(b"{}", "abc") is False
