@@ -33,21 +33,47 @@ class TokenData:
 def decode_qbo_tokens_env() -> str:
     """Decode QBO_TOKENS_JSON from Render env (base64 or raw JSON)."""
     import base64
+    import re
 
     env_val = os.getenv("QBO_TOKENS_JSON", "").strip()
     if not env_val:
         raise ValueError("QBO_TOKENS_JSON is empty — set it in Render → Environment")
 
+    # Render / copy-paste sometimes wraps the value in quotes
+    if (env_val.startswith('"') and env_val.endswith('"')) or (
+        env_val.startswith("'") and env_val.endswith("'")
+    ):
+        env_val = env_val[1:-1].strip()
+
     if env_val.startswith("{"):
         decoded = env_val
     else:
+        # Keep only base64 alphabet; drop newlines/spaces/smart junk from paste
+        cleaned = re.sub(r"[^A-Za-z0-9+/=_-]", "", env_val)
+        if not cleaned:
+            raise ValueError("QBO_TOKENS_JSON base64 is empty after cleanup")
+        # url-safe → standard
+        cleaned = cleaned.replace("-", "+").replace("_", "/")
+        pad = (-len(cleaned)) % 4
+        if pad:
+            cleaned += "=" * pad
         try:
-            cleaned = env_val.strip().replace("\n", "").replace("\r", "").replace(" ", ""); padded = cleaned + "=" * (4 - len(cleaned) % 4) if len(cleaned) % 4 != 0 else cleaned
-            decoded = base64.b64decode(padded).decode("utf-8")
+            decoded = base64.b64decode(cleaned, validate=False).decode("utf-8")
         except Exception as exc:
-            raise ValueError(f"QBO_TOKENS_JSON is not valid base64: {exc}") from exc
+            raise ValueError(
+                f"QBO_TOKENS_JSON is not valid base64 ({exc}). "
+                f"Length={len(env_val)}. Prefer pasting raw tokens.json "
+                f"(starts with {{) instead of base64."
+            ) from exc
 
-    raw = json.loads(decoded)
+    try:
+        raw = json.loads(decoded)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"QBO_TOKENS_JSON decoded but is not valid JSON ({exc}). "
+            "Paste was likely truncated — re-copy the full tokens.json from Mac."
+        ) from exc
+
     for key in ("access_token", "refresh_token", "realm_id"):
         if not raw.get(key):
             raise ValueError(f"tokens JSON missing required field: {key}")

@@ -25,6 +25,21 @@ def test_bootstrap_from_env_accepts_unpadded_base64(tmp_path, monkeypatch):
         assert json.load(fh) == payload
 
 
+def test_bootstrap_from_env_accepts_raw_json(tmp_path, monkeypatch):
+    payload = {
+        "access_token": "at",
+        "refresh_token": "rt",
+        "realm_id": "123",
+        "access_token_expires_at": 1.0,
+        "refresh_token_expires_at": 2.0,
+    }
+    token_path = str(tmp_path / "tokens.json")
+    monkeypatch.setenv("QBO_TOKENS_JSON", json.dumps(payload))
+    assert bootstrap_from_env(token_path) is True
+    with open(token_path, encoding="utf-8") as fh:
+        assert json.load(fh)["refresh_token"] == "rt"
+
+
 def test_bootstrap_from_env_force_overwrites_existing_file(tmp_path, monkeypatch):
     token_path = str(tmp_path / "tokens.json")
     with open(token_path, "w", encoding="utf-8") as fh:
