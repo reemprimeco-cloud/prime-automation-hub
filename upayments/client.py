@@ -2,18 +2,20 @@
 
 Sandbox base URL (default):
   https://sandboxapi.upayments.com/api/v1
+Live base URL:
+  https://uapi.upayments.com/api/v1
 
 Docs:
   - Charge:      POST /charge
   - Status:      GET  /get-payment-status/{track_id}
-  - Webhooks:    notificationUrl payload (payment_id, result, track_id, …)
+  - Webhooks:    POST notificationUrl as application/x-www-form-urlencoded
+                 Header: x-notification-token
+                 Fields: result, track_id, payment_id, requested_order_id, …
   - Auth:        Authorization: Bearer {UPAYMENTS_API_KEY}
                  Accept + Content-Type: application/json (required)
 
 Merchant ID is read from env for config/reconciliation. V2 auth is Bearer-token
 based; the merchant id is not used as the primary auth credential.
-
-This module is intentionally standalone — do not wire into /webhook/tap yet.
 """
 from __future__ import annotations
 
@@ -23,7 +25,7 @@ import os
 import re
 import time
 from typing import Any, Optional
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 
@@ -193,58 +195,47 @@ class UPaymentsClient:
         return self._request("GET", path)
 
     def verify_webhook_signature(self, payload: bytes, signature_header: str) -> bool:
-        """Verify UPayments webhook signature when a secret is configured.
+        """Verify UPayments webhook auth when a secret is configured.
 
-        UPayments FAQ: server-to-server webhooks are signed; HMAC rollout is in
-        progress. We implement HMAC-SHA256 over the raw body and accept either:
-          - hex digest
-          - ``sha256=<hex>`` prefix
-        compared against common signature headers.
+        Live notifications send ``x-notification-token`` (static merchant token).
+        UPayments FAQ also mentions HMAC rollout; we accept either:
+
+          1. Exact match of header vs ``UPAYMENTS_WEBHOOK_SECRET`` (notification token)
+          2. HMAC-SHA256 over the raw body (hex or ``sha256=<hex>``)
 
         Behavior:
-          - If ``UPAYMENTS_WEBHOOK_SECRET`` is empty AND no signature header → True
-            (signature not yet enforced by gateway).
-          - If secret is empty BUT a signature header is present → False
-            (cannot verify; fail closed).
-          - If secret is set → constant-time compare against HMAC-SHA256.
+          - If ``UPAYMENTS_WEBHOOK_SECRET`` is empty → True (log warning; token not enforced)
+          - If secret is set but header empty → False
+          - If secret is set → True when token or HMAC matches
         """
         sig = (signature_header or "").strip()
         secret = (self._webhook_secret or "").strip()
 
         if not secret:
-            if not sig:
-                _LOG.warning(
-                    "upayments_webhook_signature_skipped",
-                    extra={"reason": "UPAYMENTS_WEBHOOK_SECRET not set"},
-                )
-                return True
             _LOG.warning(
-                "upayments_webhook_signature_missing_secret",
-                extra={"has_header": True},
+                "upayments_webhook_signature_skipped",
+                extra={"reason": "UPAYMENTS_WEBHOOK_SECRET not set"},
             )
-            return False
+            return True
 
         if not sig:
             return False
 
+        # 1) Static notification token (observed live: x-notification-token)
+        if hmac.compare_digest(sig, secret):
+            return True
+
+        # 2) Optional HMAC-SHA256 over raw body
         expected_hex = hmac.new(
             secret.encode("utf-8"),
             payload,
             hashlib.sha256,
         ).hexdigest()
-        candidates = {
-            expected_hex,
-            expected_hex.lower(),
-            expected_hex.upper(),
-            f"sha256={expected_hex}",
-            f"sha256={expected_hex.lower()}",
-        }
-        # Also accept raw hex without prefix when header is ``sha256=…``
         normalized = sig
         if sig.lower().startswith("sha256="):
             normalized = sig.split("=", 1)[1].strip()
 
-        return hmac.compare_digest(normalized.lower(), expected_hex.lower()) or sig in candidates
+        return hmac.compare_digest(normalized.lower(), expected_hex.lower())
 
     def parse_webhook_event(self, payload: dict[str, Any]) -> PaymentEvent:
         """Normalize UPayments webhook / redirect fields into PaymentEvent."""
@@ -399,8 +390,11 @@ class UPaymentsClient:
                 f"UPayments charge response missing payment URL: {str(data)[:300]}",
                 body=str(data)[:500],
             )
+        if not charge_id and payment_url:
+            # Live charge responses often return only data.link?session_id=…
+            qs = parse_qs(urlparse(payment_url).query)
+            charge_id = str((qs.get("session_id") or [""])[0]).strip()
         if not charge_id:
-            # Fall back to embedding a synthetic id from the URL query if needed
             charge_id = payment_url
 
         status = str(nested.get("result") or nested.get("status") or data.get("message") or "")
@@ -414,11 +408,20 @@ class UPaymentsClient:
         )
 
 
-def upayments_client_from_env() -> UPaymentsClient:
-    """Build a client from environment variables (sandbox-friendly defaults)."""
+def upayments_client_from_env(*, webhook_only: bool = False) -> UPaymentsClient:
+    """Build a client from environment variables (sandbox-friendly defaults).
+
+    Set ``webhook_only=True`` for notification handling when charge credentials
+    are not configured yet — only ``UPAYMENTS_WEBHOOK_SECRET`` is needed then.
+    """
+    api_key = os.getenv("UPAYMENTS_API_KEY", "").strip()
+    merchant_id = os.getenv("UPAYMENTS_MERCHANT_ID", "").strip()
+    if webhook_only:
+        api_key = api_key or "webhook-only"
+        merchant_id = merchant_id or "0"
     return UPaymentsClient(
-        api_key=os.getenv("UPAYMENTS_API_KEY", "").strip(),
-        merchant_id=os.getenv("UPAYMENTS_MERCHANT_ID", "").strip(),
+        api_key=api_key,
+        merchant_id=merchant_id,
         base_url=os.getenv("UPAYMENTS_BASE_URL", _DEFAULT_BASE_URL).strip()
         or _DEFAULT_BASE_URL,
         return_url=os.getenv("UPAYMENTS_RETURN_URL", "").strip(),

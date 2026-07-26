@@ -153,11 +153,58 @@ def test_verify_webhook_signature_hmac(client: UPaymentsClient):
     assert client.verify_webhook_signature(payload, "deadbeef") is False
 
 
-def test_verify_webhook_signature_no_secret_allows_empty_header():
+def test_verify_webhook_notification_token(client: UPaymentsClient):
+    # Live UPayments sends x-notification-token as a static merchant token
+    assert client.verify_webhook_signature(b"ignored", "whsec_test") is True
+    assert client.verify_webhook_signature(b"ignored", "wrong") is False
+
+
+def test_verify_webhook_signature_no_secret_allows_any_header():
     c = UPaymentsClient(
         api_key="k",
         merchant_id="78508",
         webhook_secret="",
     )
     assert c.verify_webhook_signature(b"{}", "") is True
-    assert c.verify_webhook_signature(b"{}", "abc") is False
+    assert c.verify_webhook_signature(b"{}", "abc") is True
+
+
+def test_parse_webhook_event_live_form_shape(client: UPaymentsClient):
+    event = client.parse_webhook_event({
+        "payment_id": "101620726000342223",
+        "result": "CAPTURED",
+        "post_date": "0726",
+        "tran_id": "620771009962568",
+        "ref": "620771030910",
+        "track_id": "019f9eb3ad23e23a5e8744219008d63bv2",
+        "auth": "337456",
+        "order_id": "019f9eb3ad23e23a5e8744219008d63a",
+        "requested_order_id": "LIVE-TEST-001",
+        "refund_order_id": "019f9eb3ad23e23a5e8744219008d63a",
+        "invoice_id": "39686284",
+        "payment_type": "knet",
+        "payment_method": "knet",
+        "transaction_date": "2026-07-26 16:54:03",
+        "receipt_id": "019f9eb3ad23e23a5e8744219008d63a",
+        "trn_udf": "merchant_id=78508;invoice=LIVE-TEST-001",
+    })
+    assert event.status == "paid"
+    assert event.invoice_number == "LIVE-TEST-001"
+    assert event.provider_transaction_id == "019f9eb3ad23e23a5e8744219008d63bv2"
+
+
+def test_parse_charge_response_session_id_fallback():
+    result = UPaymentsClient._parse_charge_response(
+        {
+            "status": True,
+            "data": {
+                "link": (
+                    "https://apiv2.upayments.com"
+                    "?session_id=20261652022607451277286367947581632288419711124707"
+                ),
+            },
+        },
+        amount=1.0,
+        currency="KWD",
+    )
+    assert result.charge_id == "20261652022607451277286367947581632288419711124707"

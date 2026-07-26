@@ -3,7 +3,8 @@
 Endpoints:
   POST /webhook         — QBO change notifications (auto-processes Invoice Create)
   POST /webhook/tap     — Tap payment capture notifications
-  GET  /payment/success — customer lands here after Tap payment
+  POST /webhook/upayments — UPayments payment capture notifications
+  GET  /payment/success — customer lands here after payment
   GET  /invoice/{id}/pdf — QBO invoice PDF proxy
   POST /webhook/whatsapp — inbound admin WhatsApp button actions
   GET  /health          — liveness + config status
@@ -394,6 +395,128 @@ async def receive_tap_webhook(request: Request) -> dict:
         raise
     except Exception as exc:
         _LOG.error("tap_webhook_error", extra={"error": str(exc)})
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── UPayments webhook ─────────────────────────────────────────────────────────
+
+@app.post("/webhook/upayments", status_code=status.HTTP_200_OK)
+async def receive_upayments_webhook(
+    request: Request,
+    x_notification_token: Optional[str] = Header(default=None),
+    x_signature: Optional[str] = Header(default=None),
+) -> dict:
+    """Handle UPayments notification — marks QBO invoice paid + sends WhatsApp.
+
+    Live UPayments posts ``application/x-www-form-urlencoded`` with
+    ``result=CAPTURED`` and ``x-notification-token``.
+    """
+    payload_bytes: bytes = await request.body()
+    content_type = (request.headers.get("content-type") or "").lower()
+
+    payload: dict
+    if "application/json" in content_type:
+        try:
+            parsed = json.loads(payload_bytes or b"{}")
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON")
+        payload = parsed if isinstance(parsed, dict) else {}
+    else:
+        # Default / observed live: form-urlencoded
+        payload = {
+            key: (values[0] if values else "")
+            for key, values in parse_qs(
+                payload_bytes.decode("utf-8", errors="replace"),
+                keep_blank_values=True,
+            ).items()
+        }
+
+    from upayments.client import upayments_client_from_env
+    from upayments.exceptions import UPaymentsAPIError
+
+    try:
+        up = upayments_client_from_env(webhook_only=True)
+    except UPaymentsAPIError as exc:
+        _LOG.error("upayments_webhook_client_config_error", extra={"error": str(exc)})
+        raise HTTPException(status_code=503, detail="UPayments not configured") from exc
+
+    token_header = (x_notification_token or x_signature or "").strip()
+    if not up.verify_webhook_signature(payload_bytes, token_header):
+        _LOG.warning("upayments_webhook_auth_failed")
+        raise HTTPException(status_code=401, detail="Invalid notification token")
+
+    try:
+        event = up.parse_webhook_event(payload)
+    except UPaymentsAPIError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    _LOG.info(
+        "upayments_webhook_received",
+        extra={
+            "result": payload.get("result"),
+            "track_id": event.provider_transaction_id,
+            "invoice_number": event.invoice_number,
+            "status": event.status,
+        },
+    )
+
+    if event.status != "paid":
+        return {
+            "status": "ignored",
+            "result": payload.get("result"),
+            "provider_status": event.status,
+        }
+
+    if not event.provider_transaction_id and not event.invoice_number:
+        raise HTTPException(status_code=400, detail="Missing track_id / order id")
+
+    amount = float(event.amount) if event.amount is not None else 0.0
+    currency = event.currency or "KWD"
+    capture_ref = event.provider_transaction_id or event.invoice_number
+
+    try:
+        from config import get_settings
+        from qbo.client import QuickBooksClient
+        from messaging.whatsapp import whatsapp_client_from_settings
+        from workflows.payment_capture import handle_payment_capture, CaptureError
+
+        settings = get_settings()
+        qbo = QuickBooksClient(settings=settings)
+        wa = whatsapp_client_from_settings(settings)
+
+        result = handle_payment_capture(
+            capture_ref,
+            amount,
+            currency,
+            qbo_client=qbo,
+            whatsapp_client=wa,
+            tap_payment_ref=str(
+                payload.get("payment_id") or payload.get("tran_id") or capture_ref
+            ),
+            tap_webhook_payload=payload,
+        )
+
+        if isinstance(result, CaptureError):
+            if result.reason == "CHARGE_NOT_FOUND":
+                return {
+                    "status": "unknown_charge",
+                    "track_id": capture_ref,
+                    "invoice_number": event.invoice_number,
+                }
+            raise HTTPException(status_code=500, detail=result.detail)
+
+        return {
+            "status": "ok",
+            "capture_status": result.status,
+            "invoice_id": result.invoice_id,
+            "qbo_payment_id": result.qbo_payment_id,
+            "whatsapp_sent": result.whatsapp_sent,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _LOG.error("upayments_webhook_error", extra={"error": str(exc)})
         raise HTTPException(status_code=500, detail=str(exc))
 
 
