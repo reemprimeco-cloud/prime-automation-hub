@@ -75,6 +75,26 @@ def _lookup_payment_record(
             )
             return record
 
+    # UPayments webhooks send requested_order_id = our invoice DocNumber
+    for candidate in (
+        str(payload.get("requested_order_id") or ""),
+        str(payload.get("merchant_requested_order_id") or ""),
+        invoice_number,
+    ):
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        record = db.get_by_invoice_number(candidate)
+        if record is not None:
+            _LOG.info(
+                "capture_found_by_invoice_number",
+                extra={
+                    "tap_charge_id": tap_charge_id,
+                    "invoice_number": candidate,
+                },
+            )
+            return record
+
     from config import get_settings
     from tap.client import tap_client_from_settings
 

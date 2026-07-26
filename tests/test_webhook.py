@@ -164,6 +164,11 @@ def test_db_does_not_exist_returns_zero(tmp_path, monkeypatch):
 def web_client(tmp_db, monkeypatch):
     """TestClient with verifier token and temp DB configured."""
     monkeypatch.setenv("QBO_WEBHOOK_VERIFIER_TOKEN", TOKEN)
+    monkeypatch.setenv("QBO_CLIENT_ID", "test-client-id")
+    monkeypatch.setenv("QBO_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv("QBO_REDIRECT_URI", "https://example.com/oauth/callback")
+    monkeypatch.setenv("QBO_ENVIRONMENT", "sandbox")
+    monkeypatch.setenv("QBO_REALM_ID", "123456")
     from webhook.server import app
     return TestClient(app, raise_server_exceptions=True)
 
@@ -360,3 +365,138 @@ def test_tap_webhook_unknown_charge_after_startup(web_client, tmp_path, monkeypa
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == "unknown_charge"
+
+
+_UPAYMENTS_FORM = (
+    "payment_id=101620726000342223"
+    "&result=CAPTURED"
+    "&post_date=0726"
+    "&tran_id=620771009962568"
+    "&ref=620771030910"
+    "&track_id=019f9eb3ad23e23a5e8744219008d63bv2"
+    "&auth=337456"
+    "&order_id=019f9eb3ad23e23a5e8744219008d63a"
+    "&requested_order_id=LIVE-TEST-001"
+    "&refund_order_id=019f9eb3ad23e23a5e8744219008d63a"
+    "&invoice_id=39686284"
+    "&payment_type=knet"
+    "&payment_method=knet"
+    "&transaction_date=2026-07-26+16%3A54%3A03"
+    "&receipt_id=019f9eb3ad23e23a5e8744219008d63a"
+    "&trn_udf=merchant_id%3D78508%3Binvoice%3DLIVE-TEST-001"
+)
+
+
+def test_upayments_webhook_rejects_bad_token(web_client, monkeypatch):
+    monkeypatch.setenv("UPAYMENTS_WEBHOOK_SECRET", "expected-token")
+    resp = web_client.post(
+        "/webhook/upayments",
+        content=_UPAYMENTS_FORM,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "x-notification-token": "wrong-token",
+        },
+    )
+    assert resp.status_code == 401
+
+
+def test_upayments_webhook_unknown_charge(web_client, tmp_path, monkeypatch):
+    db_path = str(tmp_path / "hub.db")
+    monkeypatch.setenv("DATABASE_PATH", db_path)
+    monkeypatch.setenv("UPAYMENTS_WEBHOOK_SECRET", "expected-token")
+
+    class _FakeQBO:
+        pass
+
+    monkeypatch.setattr("qbo.client.QuickBooksClient", lambda settings=None: _FakeQBO())
+    monkeypatch.setattr(
+        "messaging.whatsapp.whatsapp_client_from_settings",
+        lambda settings=None: None,
+    )
+
+    resp = web_client.post(
+        "/webhook/upayments",
+        content=_UPAYMENTS_FORM,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "x-notification-token": "expected-token",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "unknown_charge"
+    assert body["invoice_number"] == "LIVE-TEST-001"
+
+
+def test_upayments_webhook_captures_by_invoice_number(web_client, tmp_path, monkeypatch):
+    db_path = str(tmp_path / "hub.db")
+    monkeypatch.setenv("DATABASE_PATH", db_path)
+    monkeypatch.setenv("UPAYMENTS_WEBHOOK_SECRET", "expected-token")
+
+    from db import payment_links as db
+
+    db.init_table()
+    db.create_link(
+        invoice_id="inv-99",
+        customer_id="cust-1",
+        tap_charge_id="session-abc",
+        payment_url="https://pay.example/abc",
+        amount=1.0,
+        invoice_number="LIVE-TEST-001",
+        customer_name="Test Co",
+        currency="KWD",
+    )
+
+    class _FakeQBO:
+        def create_payment(self, **kwargs):
+            return {"Id": "PAY-UP-1"}
+
+        def get_customer_by_id(self, customer_id):
+            from qbo.models import Customer
+            return Customer(
+                id=customer_id,
+                display_name="Test Co",
+                email="",
+                phone="+96550000000",
+                mobile="",
+                alternate_phone="",
+            )
+
+    class _FakeWA:
+        def send_payment_confirmation(self, *a, **k):
+            return MagicMock(sent=True, sid="SM1")
+
+    monkeypatch.setattr("qbo.client.QuickBooksClient", lambda settings=None: _FakeQBO())
+    monkeypatch.setattr(
+        "messaging.whatsapp.whatsapp_client_from_settings",
+        lambda settings=None: _FakeWA(),
+    )
+
+    resp = web_client.post(
+        "/webhook/upayments",
+        content=_UPAYMENTS_FORM,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "x-notification-token": "expected-token",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["capture_status"] == "PAYMENT_CAPTURED"
+    assert body["invoice_id"] == "inv-99"
+    assert body["qbo_payment_id"] == "PAY-UP-1"
+
+
+def test_upayments_webhook_ignores_non_captured(web_client, monkeypatch):
+    monkeypatch.setenv("UPAYMENTS_WEBHOOK_SECRET", "expected-token")
+    resp = web_client.post(
+        "/webhook/upayments",
+        content="result=NOT+CAPTURED&track_id=t1&requested_order_id=2555",
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "x-notification-token": "expected-token",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ignored"
