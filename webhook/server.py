@@ -16,7 +16,7 @@ import os
 import time
 from html import escape
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 from urllib.parse import parse_qs
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, status
@@ -562,14 +562,197 @@ async def oauth_callback(request: Request) -> HTMLResponse:
     )
 
 
-# ── Tap payment redirect landing page ─────────────────────────────────────────
+# ── Payment redirect landing page (UPayments returnUrl / cancelUrl) ────────────
+# Both UPAYMENTS_RETURN_URL and UPAYMENTS_CANCEL_URL may point here. Outcome is
+# NEVER inferred from which URL redirected — only from get_charge_status.
+
+_PAID_REDIRECT_RESULTS = frozenset({"CAPTURED", "PAID", "SUCCESS"})
+_FAILED_REDIRECT_RESULTS = frozenset({
+    "NOT CAPTURED",
+    "CANCELED",
+    "CANCELLED",
+    "FAILED",
+    "DECLINED",
+    "ERROR",
+    "VOIDED",
+})
+_SUPPORT_WHATSAPP_URL = "https://wa.me/96565068000"
+
+
+def _payment_result_from_status_payload(status_resp: dict) -> str:
+    """Extract gateway ``result`` from get-payment-status JSON (best-effort)."""
+    data = status_resp.get("data") if isinstance(status_resp.get("data"), dict) else status_resp
+    if not isinstance(data, dict):
+        return ""
+    transaction = data.get("transaction") if isinstance(data.get("transaction"), dict) else {}
+    return str(
+        transaction.get("result")
+        or data.get("result")
+        or data.get("payment_status")
+        or data.get("status")
+        or status_resp.get("result")
+        or ""
+    ).strip()
+
+
+def _render_payment_page(
+    status: Literal["success", "failed", "unknown"],
+) -> HTMLResponse:
+    """Customer-facing HTML after UPayments redirect (verified server-side)."""
+    if status == "success":
+        if _PAYMENT_SUCCESS_PAGE.is_file():
+            return HTMLResponse(
+                _PAYMENT_SUCCESS_PAGE.read_text(encoding="utf-8"),
+                media_type="text/html; charset=utf-8",
+            )
+        title = "Payment successful"
+        heading = "Payment successful"
+        body = (
+            "Thank you for your payment. Your invoice will be updated shortly and you "
+            "will receive a confirmation on WhatsApp."
+        )
+        icon = "✓"
+        accent = "#1f7a4d"
+        soft = "#e8f5ee"
+        actions = (
+            '<a class="button" href="https://www.primeprint.com.kw">Back to Prime Print</a>'
+        )
+    elif status == "failed":
+        title = "Payment not completed — Prime Print"
+        heading = "Payment not completed"
+        body = (
+            "Your payment was not completed. No charge was made, or the payment was cancelled. "
+            "If you believe this is an error, please contact us on WhatsApp and we will help."
+        )
+        icon = "!"
+        accent = "#9a3412"
+        soft = "#ffedd5"
+        actions = (
+            f'<a class="button" href="{_SUPPORT_WHATSAPP_URL}">Message us on WhatsApp</a>'
+            '<div style="margin-top:12px">'
+            '<a href="https://www.primeprint.com.kw" style="color:#5f6f63">Back to Prime Print</a>'
+            "</div>"
+        )
+    else:
+        title = "Confirming payment — Prime Print"
+        heading = "We're confirming your payment"
+        body = (
+            "We're confirming your payment status. You'll receive a WhatsApp confirmation "
+            "once it is verified. You can safely close this page."
+        )
+        icon = "…"
+        accent = "#334155"
+        soft = "#e2e8f0"
+        actions = (
+            f'<a class="button" href="{_SUPPORT_WHATSAPP_URL}">Message us on WhatsApp</a>'
+        )
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{escape(title)}</title>
+    <style>
+      :root {{ color-scheme: light; --bg:#f4f7f5; --card:#fff; --text:#1a2e1f;
+        --muted:#5f6f63; --accent:{accent}; --accent-soft:{soft}; --border:#d8e3dc; }}
+      * {{ box-sizing: border-box; }}
+      body {{ margin:0; min-height:100vh; display:grid; place-items:center; padding:24px;
+        font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+        background:linear-gradient(180deg,var(--bg) 0%,#e9f0eb 100%); color:var(--text); }}
+      .card {{ width:min(100%,440px); background:var(--card); border:1px solid var(--border);
+        border-radius:16px; padding:32px 28px; box-shadow:0 12px 40px rgba(26,46,31,.08);
+        text-align:center; }}
+      .icon {{ width:72px; height:72px; margin:0 auto 20px; border-radius:50%; display:grid;
+        place-items:center; background:var(--accent-soft); color:var(--accent);
+        font-size:36px; line-height:1; }}
+      h1 {{ margin:0 0 10px; font-size:1.5rem; font-weight:700; }}
+      p {{ margin:0; color:var(--muted); line-height:1.6; }}
+      .actions {{ margin-top:24px; }}
+      a.button {{ display:inline-block; padding:12px 18px; border-radius:999px;
+        background:var(--accent); color:#fff; text-decoration:none; font-weight:600; }}
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <div class="icon" aria-hidden="true">{escape(icon)}</div>
+      <h1>{escape(heading)}</h1>
+      <p>{escape(body)}</p>
+      <div class="actions">{actions}</div>
+    </main>
+  </body>
+</html>"""
+    return HTMLResponse(html, media_type="text/html; charset=utf-8")
+
 
 @app.get("/payment/success")
-async def payment_success() -> FileResponse:
-    """Landing page after Tap redirects the customer back from checkout."""
-    if not _PAYMENT_SUCCESS_PAGE.is_file():
-        raise HTTPException(status_code=500, detail="Payment success page not found")
-    return FileResponse(_PAYMENT_SUCCESS_PAGE, media_type="text/html; charset=utf-8")
+async def payment_success(request: Request) -> HTMLResponse:
+    """Landing page after UPayments redirects the customer back.
+
+    MUST verify actual payment status before showing success — never trust the
+    redirect alone (customers can bookmark/reload/share this URL). returnUrl and
+    cancelUrl may both point here; only get_charge_status decides the outcome.
+    """
+    track_id = (
+        request.query_params.get("track_id")
+        or request.query_params.get("trackId")
+        or request.query_params.get("TrackId")
+        or ""
+    ).strip()
+    session_id = (request.query_params.get("session_id") or "").strip()
+    charge_id = track_id or session_id
+
+    if not charge_id:
+        _LOG.warning(
+            "payment_success_no_identifier",
+            extra={"query": dict(request.query_params)},
+        )
+        return _render_payment_page(status="unknown")
+
+    from upayments.client import upayments_client_from_env
+    from upayments.exceptions import UPaymentsAPIError
+
+    try:
+        client = upayments_client_from_env()
+        status_resp = client.get_charge_status(charge_id)
+        result = _payment_result_from_status_payload(status_resp)
+        result_upper = result.upper()
+
+        if result_upper in _PAID_REDIRECT_RESULTS:
+            _LOG.info(
+                "payment_success_verified",
+                extra={"track_id": charge_id, "result": result},
+            )
+            return _render_payment_page(status="success")
+
+        if (
+            result_upper in _FAILED_REDIRECT_RESULTS
+            or "NOT CAPTURED" in result_upper
+        ):
+            _LOG.info(
+                "payment_success_route_hit_but_not_paid",
+                extra={"track_id": charge_id, "result": result},
+            )
+            return _render_payment_page(status="failed")
+
+        # PENDING / empty / AUTHORIZED / unknown → never claim success or failure
+        _LOG.info(
+            "payment_success_status_pending_or_unknown",
+            extra={"track_id": charge_id, "result": result},
+        )
+        return _render_payment_page(status="unknown")
+    except UPaymentsAPIError as exc:
+        _LOG.error(
+            "payment_success_status_check_failed",
+            extra={"track_id": charge_id, "error": str(exc)},
+        )
+        return _render_payment_page(status="unknown")
+    except Exception as exc:
+        _LOG.error(
+            "payment_success_unexpected_error",
+            extra={"track_id": charge_id, "error": str(exc)},
+        )
+        return _render_payment_page(status="unknown")
 
 
 # ── Invoice PDF proxy ──────────────────────────────────────────────────────────
