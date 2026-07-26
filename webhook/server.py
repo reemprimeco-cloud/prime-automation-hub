@@ -149,14 +149,14 @@ def _handle_invoice_update(invoice_id: str, existing_link: dict) -> None:
 
 
 def _process_qbo_invoice(invoice_id: str) -> None:
-    """Run the full invoice → Tap link → WhatsApp workflow in the background.
+    """Run the full invoice → UPayments link → WhatsApp workflow in the background.
 
     Called when QBO fires an Invoice Create event. Runs after the webhook
     has already returned 200 to Intuit, so processing time doesn't matter.
     Retries with backoff when QBO has not propagated the invoice yet.
     """
     from qbo.client import QBOError, QuickBooksClient
-    from tap.client import tap_client_from_settings
+    from upayments.client import upayments_client_from_env
     from messaging.whatsapp import whatsapp_client_from_settings
     from workflows.invoice_to_tap import process_invoice, LinkResult, SkipResult
 
@@ -171,13 +171,13 @@ def _process_qbo_invoice(invoice_id: str) -> None:
 
             settings = get_settings()
             qbo = QuickBooksClient(settings=settings)
-            tap = tap_client_from_settings(settings)
+            upayments = upayments_client_from_env()
             whatsapp = whatsapp_client_from_settings(settings)
 
             result = process_invoice(
                 invoice_id,
                 qbo_client=qbo,
-                tap_client=tap,
+                upayments_client=upayments,
                 whatsapp_client=whatsapp,
                 settings=settings,
             )
