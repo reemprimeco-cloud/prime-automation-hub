@@ -31,11 +31,16 @@ def main() -> None:
 
     raw = path.read_text(encoding="utf-8")
     json.loads(raw)  # validate
-    encoded = base64.b64encode(raw.encode()).decode().rstrip("=")
+    encoded = base64.b64encode(raw.encode()).decode()  # keep = padding
+    out = path.with_name("tokens_for_render.b64")
+    out.write_text(encoded + "\n", encoding="utf-8")
     print(encoded)
     print(
-        "\nPaste the line above into Render → Environment → QBO_TOKENS_JSON "
-        "(base64 only — no quotes, no raw JSON). Then Manual Deploy.",
+        f"\nAlso wrote {out.name}.\n"
+        "EASIEST on Render: paste the contents of tokens.json (starts with {) "
+        "into QBO_TOKENS_JSON — raw JSON is supported.\n"
+        "Or paste the base64 line above (full line, no quotes). Then run:\n"
+        "  python -m scripts.bootstrap_tokens_from_env",
         file=sys.stderr,
     )
 
