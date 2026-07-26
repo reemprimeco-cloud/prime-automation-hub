@@ -1,15 +1,17 @@
-"""Invoice-to-Tap payment link workflow.
+"""Invoice → UPayments payment link workflow.
 
-Orchestrates the complete Phase 3 flow:
-  1. Idempotency check — return existing link if already generated
+Orchestrates:
+  1. Idempotency check — return existing link if still valid
   2. Fetch and validate the QBO invoice (skip paid / voided)
   3. Fetch customer details
-  4. Normalise phone number for Tap
-  5. Create Tap hosted payment link
-  6. Persist to database
+  4. Normalise Kuwait mobile for UPayments
+  5. Create UPayments hosted payment link
+  6. Persist to database (``tap_charge_id`` column stores provider charge id)
   7. Write the link back to the QBO invoice's PrivateNote
+  8. Send WhatsApp payment link (best-effort)
 
-The caller owns the QBO and Tap clients — the workflow itself is stateless.
+Legacy Tap ``inv_`` / ``chg_`` rows are treated as stale and regenerated on
+UPayments. The ``/webhook/tap`` route remains for any in-flight Tap payments.
 """
 from __future__ import annotations
 
@@ -20,14 +22,23 @@ from db import payment_links as db
 from logging_config import get_logger
 from qbo.client import QBOError, QuickBooksClient
 from qbo.phone import is_kuwait_mobile, normalize
-from tap.client import TapClient
-from tap.exceptions import TapError
-from tap.models import CreateChargeRequest, TapCustomer, TapPhoneNumber
+from tap.models import TapPhoneNumber
+from upayments.client import UPaymentsClient
+from upayments.exceptions import UPaymentsAPIError
 
 _LOG = get_logger("workflow.invoice_to_tap")
 
-_STALE_CHARGE_STATUSES = frozenset({"CANCELLED", "ABANDONED", "EXPIRED"})
-_STALE_INVOICE_STATUSES = frozenset({"CANCELLED", "EXPIRED", "PAID"})
+_STALE_UPAYMENT_RESULTS = frozenset({
+    "NOT CAPTURED",
+    "FAILED",
+    "CANCELED",
+    "CANCELLED",
+    "EXPIRED",
+    "VOIDED",
+    "DECLINED",
+    "ERROR",
+})
+_PAID_UPAYMENT_RESULTS = frozenset({"CAPTURED", "PAID", "SUCCESS"})
 
 
 # ── result types ──────────────────────────────────────────────────────────────
@@ -40,7 +51,7 @@ class LinkResult:
     customer_name: str
     amount: float
     currency: str
-    tap_charge_id: str
+    tap_charge_id: str  # provider charge id (UPayments track/session id)
     payment_url: str
     status: str               # "LINK_GENERATED" or "EXISTING_LINK_RETURNED"
     qbo_note_updated: bool
@@ -80,7 +91,10 @@ def _validate_invoice(invoice: dict) -> SkipResult | None:
 # ── phone helpers ─────────────────────────────────────────────────────────────
 
 def _phone_for_tap(customer) -> TapPhoneNumber:
-    """Return the best Kuwait mobile number split for Tap, or empty if none valid."""
+    """Return the best Kuwait mobile number, or empty if none valid.
+
+    Name retained for call-site compatibility; used for UPayments + WhatsApp.
+    """
     for raw in [customer.mobile, customer.phone, customer.alternate_phone]:
         norm = normalize(raw)
         if norm and is_kuwait_mobile(norm):      # mobiles only — landlines excluded
@@ -94,12 +108,18 @@ def _split_name(display_name: str) -> tuple[str, str]:
     return parts[0], (parts[1] if len(parts) > 1 else ".")
 
 
+def _e164(phone: TapPhoneNumber) -> str:
+    if not phone.number:
+        return ""
+    return f"+{phone.country_code}{phone.number}"
+
+
 # ── QBO note format ───────────────────────────────────────────────────────────
 
 def _build_private_note(
     existing_note: str,
     payment_url: str,
-    tap_charge_id: str,
+    charge_id: str,
     generated_at: str,
 ) -> str:
     parts = []
@@ -108,7 +128,7 @@ def _build_private_note(
     parts.append(
         f"--- Prime Automation Hub ---\n"
         f"Payment Link:\n{payment_url}\n\n"
-        f"Tap Reference:\n{tap_charge_id}\n\n"
+        f"UPayments Reference:\n{charge_id}\n\n"
         f"Generated At:\n{generated_at}"
     )
     return "\n\n".join(parts)
@@ -130,16 +150,38 @@ def _existing_link_result(existing: dict) -> LinkResult:
     )
 
 
-def _is_stale_tap_link(tap_client: TapClient, tap_reference_id: str) -> bool:
-    """True when the Tap link can no longer be paid and should be regenerated."""
-    if tap_reference_id.startswith("inv_"):
-        invoice = tap_client.get_tap_invoice(tap_reference_id)
-        status = str(invoice.get("status", "")).upper()
-        return status in _STALE_INVOICE_STATUSES
+def _is_legacy_tap_reference(charge_id: str) -> bool:
+    cid = (charge_id or "").strip()
+    return cid.startswith("inv_") or cid.startswith("chg_")
 
-    charge = tap_client.get_charge(tap_reference_id)
-    status = str(charge.get("status", "")).upper()
-    return status in _STALE_CHARGE_STATUSES
+
+def _is_stale_upayments_link(upayments_client: UPaymentsClient, charge_id: str) -> bool:
+    """True when the stored link should be regenerated."""
+    if not charge_id:
+        return True
+    # Old Tap references → cut over to UPayments on next process
+    if _is_legacy_tap_reference(charge_id):
+        return True
+    # Full payment URL stored as id (pre-session_id fix) — regenerate cleanly
+    if charge_id.startswith("http"):
+        return True
+
+    try:
+        data = upayments_client.get_charge_status(charge_id)
+    except UPaymentsAPIError as exc:
+        _LOG.warning(
+            "upayments_stale_check_failed",
+            extra={"charge_id": charge_id, "error": str(exc)},
+        )
+        return False
+
+    nested = data.get("data") if isinstance(data.get("data"), dict) else data
+    result = str(
+        nested.get("result") or nested.get("payment_status") or nested.get("status") or ""
+    ).strip().upper()
+    if result in _PAID_UPAYMENT_RESULTS or result in _STALE_UPAYMENT_RESULTS:
+        return True
+    return False
 
 
 # ── main entry point ──────────────────────────────────────────────────────────
@@ -148,9 +190,10 @@ def process_invoice(
     invoice_id: str,
     *,
     qbo_client: QuickBooksClient,
-    tap_client: TapClient,
+    upayments_client: UPaymentsClient,
     settings,
     whatsapp_client=None,          # messaging.whatsapp.WhatsAppClient | None
+    tap_client=None,               # ignored — kept for call-site compat during cutover
 ) -> LinkResult | SkipResult:
     """Run the full workflow for a single QBO invoice.
 
@@ -158,10 +201,10 @@ def process_invoice(
       LinkResult   — a new link was generated, or an existing one was returned
       SkipResult   — the invoice is paid/void and should not get a link
     Raises:
-      QBOError     — QuickBooks API failure
-      TapError     — Tap Payments API failure
+      QBOError           — QuickBooks API failure
+      UPaymentsAPIError  — UPayments API failure
     """
-    _LOG.info("workflow_start", extra={"invoice_id": invoice_id})
+    _LOG.info("workflow_start", extra={"invoice_id": invoice_id, "provider": "upayments"})
 
     # ── 1. Fetch + validate invoice ───────────────────────────────────────────
     invoice = qbo_client.get_invoice(invoice_id)
@@ -176,10 +219,10 @@ def process_invoice(
     db.init_table()
     existing = db.get_by_invoice_id(invoice_id)
     if existing:
-        tap_charge_id = existing["tap_charge_id"]
+        charge_id = existing["tap_charge_id"]
         stored_amount = float(existing.get("amount", 0))
         try:
-            stale = _is_stale_tap_link(tap_client, tap_charge_id)
+            stale = _is_stale_upayments_link(upayments_client, charge_id)
             balance_changed = abs(amount_due - stored_amount) >= 0.001
             partially_paid = amount_due < total_amt - 0.001
             link_covers_more_than_due = stored_amount > amount_due + 0.001
@@ -200,7 +243,7 @@ def process_invoice(
                     reason,
                     extra={
                         "invoice_id": invoice_id,
-                        "tap_reference_id": tap_charge_id,
+                        "charge_id": charge_id,
                         "stored_amount": stored_amount,
                         "amount_due": amount_due,
                         "total_amt": total_amt,
@@ -213,15 +256,15 @@ def process_invoice(
             else:
                 _LOG.info(
                     "idempotency_hit",
-                    extra={"invoice_id": invoice_id, "tap_charge_id": tap_charge_id},
+                    extra={"invoice_id": invoice_id, "charge_id": charge_id},
                 )
                 return _existing_link_result(existing)
-        except TapError as exc:
+        except UPaymentsAPIError as exc:
             _LOG.warning(
                 "stale_charge_check_failed",
                 extra={
                     "invoice_id": invoice_id,
-                    "tap_charge_id": tap_charge_id,
+                    "charge_id": charge_id,
                     "error": str(exc),
                 },
             )
@@ -245,7 +288,7 @@ def process_invoice(
         if whatsapp_client is not None and bank_info:
             phone = _phone_for_tap(customer)
             if phone.number:
-                wa_number = f"+{phone.country_code}{phone.number}"
+                wa_number = _e164(phone)
                 msg = whatsapp_client.send_payment_link(
                     wa_number,
                     customer_name=customer.display_name,
@@ -271,11 +314,11 @@ def process_invoice(
         return SkipResult(
             invoice_id=invoice_id,
             reason="BANK_TRANSFER",
-            detail="Customer prefers bank transfer — no Tap link generated.",
+            detail="Customer prefers bank transfer — no UPayments link generated.",
         )
 
-    tap_phone = _phone_for_tap(customer)
-    if not tap_phone.number:
+    phone = _phone_for_tap(customer)
+    if not phone.number:
         _LOG.error(
             "missing_customer_phone",
             extra={
@@ -298,40 +341,36 @@ def process_invoice(
             ),
         )
 
-    # ── 4. Build Tap request ──────────────────────────────────────────────────
-    first, last = _split_name(customer.display_name or customer_display_name)
-    tap_customer = TapCustomer(
-        first_name=first,
-        last_name=last,
-        email=customer.email or "",
-        phone=tap_phone,
-    )
-    tap_request = CreateChargeRequest(
+    customer_phone = _e164(phone)
+    customer_name = customer.display_name or customer_display_name or "Customer"
+
+    # ── 4–5. Create UPayments hosted charge ───────────────────────────────────
+    # requested_order_id / order.id = DocNumber so webhook matches payment_links
+    charge = upayments_client.create_charge(
         amount=amount_due,
         currency=currency,
-        description=f"Invoice #{invoice_number} — {customer.display_name}",
-        customer=tap_customer,
-        transaction_ref=f"INV-{invoice_number}",
-        order_ref=invoice_id,
-        redirect_url=settings.tap_redirect_url,
-        webhook_url=settings.tap_webhook_url,
-        metadata={
-            "qbo_invoice_id": invoice_id,
-            "invoice_number": invoice_number,
-            "qbo_customer_id": qbo_customer_id,
-        },
+        customer_name=customer_name,
+        customer_phone=customer_phone,
+        invoice_number=invoice_number,
+        description=f"Invoice #{invoice_number} — {customer_name}",
+        customer_email=customer.email or "",
+        customer_unique_id=qbo_customer_id or invoice_number,
     )
+    payment_url = str(charge.get("payment_url") or "")
+    charge_id = str(charge.get("charge_id") or "")
+    if not payment_url or not charge_id:
+        raise UPaymentsAPIError(
+            f"UPayments create_charge missing payment_url/charge_id: {charge!r}"
+        )
 
-    # ── 5. Create Tap invoice link ──────────────────────────────────────────────
-    tap_invoice = tap_client.create_tap_invoice(tap_request)
     generated_at = datetime.now(timezone.utc).isoformat()
 
     # ── 6. Persist to database ────────────────────────────────────────────────
     db.create_link(
         invoice_id=invoice_id,
         customer_id=qbo_customer_id,
-        tap_charge_id=tap_invoice.id,
-        payment_url=tap_invoice.url,
+        tap_charge_id=charge_id,
+        payment_url=payment_url,
         amount=amount_due,
         currency=currency,
         invoice_number=invoice_number,
@@ -342,7 +381,7 @@ def process_invoice(
     qbo_updated = False
     try:
         note = _build_private_note(
-            existing_note, tap_invoice.url, tap_invoice.id, generated_at
+            existing_note, payment_url, charge_id, generated_at
         )
         qbo_client.update_invoice_note(invoice_id, sync_token, note)
         db.mark_qbo_updated(invoice_id)
@@ -360,14 +399,14 @@ def process_invoice(
     wa_sid = ""
 
     if whatsapp_client is not None:
-        wa_number = f"+{tap_phone.country_code}{tap_phone.number}"
+        wa_number = customer_phone
         msg = whatsapp_client.send_payment_link(
             wa_number,
             customer_name=customer.display_name,
             invoice_number=invoice_number,
             amount=amount_due,
             currency=currency,
-            payment_url=tap_invoice.url,
+            payment_url=payment_url,
             invoice_link=invoice_link,
         )
         if msg.sent:
@@ -388,7 +427,8 @@ def process_invoice(
         "workflow_complete",
         extra={
             "invoice_id": invoice_id,
-            "tap_charge_id": tap_invoice.id,
+            "charge_id": charge_id,
+            "provider": "upayments",
             "qbo_updated": qbo_updated,
             "whatsapp_sent": wa_sent,
             "amount_due": amount_due,
@@ -402,8 +442,8 @@ def process_invoice(
         customer_name=customer.display_name,
         amount=amount_due,
         currency=currency,
-        tap_charge_id=tap_invoice.id,
-        payment_url=tap_invoice.url,
+        tap_charge_id=charge_id,
+        payment_url=payment_url,
         status="LINK_GENERATED",
         qbo_note_updated=qbo_updated,
         created_at=generated_at,

@@ -151,10 +151,8 @@ def test_missing_credentials_raises():
 
 def test_workflow_sends_whatsapp_on_happy_path(monkeypatch):
     """WhatsApp is sent when customer has a valid mobile."""
-    import time
     from config import Settings
     from qbo.models import Customer
-    from tap.models import InvoiceResponse
     from workflows.invoice_to_tap import process_invoice, LinkResult
     import db.payment_links as db_module
 
@@ -188,18 +186,25 @@ def test_workflow_sends_whatsapp_on_happy_path(monkeypatch):
     )
     qbo.update_invoice_note.return_value = {}
 
-    tap = MagicMock()
-    tap.create_tap_invoice.return_value = InvoiceResponse(
-        id="inv_test", url="https://tap.test/invoice",
-        status="CREATED", amount=48.0, currency="KWD", tap_customer_id="cus_x",
-    )
+    up = MagicMock()
+    up.create_charge.return_value = {
+        "payment_url": "https://apiv2.upayments.com?session_id=sess_x",
+        "charge_id": "sess_x",
+        "status": "ok",
+        "amount": 48.0,
+        "currency": "KWD",
+        "provider": "upayments",
+        "raw": {},
+    }
 
     wa = MagicMock()
     wa.send_payment_link.return_value = MessageResult(
         to="+96565068000", sid="SM_test", status="queued"
     )
 
-    result = process_invoice("42", qbo_client=qbo, tap_client=tap, whatsapp_client=wa, settings=settings)
+    result = process_invoice(
+        "42", qbo_client=qbo, upayments_client=up, whatsapp_client=wa, settings=settings
+    )
     assert isinstance(result, LinkResult)
     assert result.whatsapp_sent is True
     assert result.whatsapp_number == "+96565068000"
@@ -207,14 +212,13 @@ def test_workflow_sends_whatsapp_on_happy_path(monkeypatch):
     wa.send_admin_tap_notify.assert_called_once_with("1089", "Dar Haa", 48.0, "KWD")
     _, kwargs = wa.send_payment_link.call_args
     assert kwargs["invoice_link"] == "https://prime-automation-hub.onrender.com/invoice/42/pdf"
-    assert kwargs["payment_url"] == "https://tap.test/invoice"
+    assert "upayments.com" in kwargs["payment_url"]
 
 
 def test_workflow_skips_whatsapp_when_no_client(monkeypatch):
     """Passing whatsapp_client=None skips WhatsApp without error."""
     from config import Settings
     from qbo.models import Customer
-    from tap.models import InvoiceResponse
     from workflows.invoice_to_tap import process_invoice, LinkResult
     import db.payment_links as db_module
 
@@ -244,13 +248,20 @@ def test_workflow_skips_whatsapp_when_no_client(monkeypatch):
     )
     qbo.update_invoice_note.return_value = {}
 
-    tap = MagicMock()
-    tap.create_tap_invoice.return_value = InvoiceResponse(
-        id="inv_x", url="https://tap.test/invoice",
-        status="CREATED", amount=48.0, currency="KWD", tap_customer_id="",
-    )
+    up = MagicMock()
+    up.create_charge.return_value = {
+        "payment_url": "https://apiv2.upayments.com?session_id=sess_x",
+        "charge_id": "sess_x",
+        "status": "ok",
+        "amount": 48.0,
+        "currency": "KWD",
+        "provider": "upayments",
+        "raw": {},
+    }
 
-    result = process_invoice("42", qbo_client=qbo, tap_client=tap, whatsapp_client=None, settings=settings)
+    result = process_invoice(
+        "42", qbo_client=qbo, upayments_client=up, whatsapp_client=None, settings=settings
+    )
     assert isinstance(result, LinkResult)
     assert result.whatsapp_sent is False
 
@@ -259,7 +270,6 @@ def test_workflow_does_not_fail_when_whatsapp_errors(monkeypatch):
     """A Twilio error must not fail the workflow — link is still valid."""
     from config import Settings
     from qbo.models import Customer
-    from tap.models import InvoiceResponse
     from workflows.invoice_to_tap import process_invoice, LinkResult
     import db.payment_links as db_module
 
@@ -292,19 +302,26 @@ def test_workflow_does_not_fail_when_whatsapp_errors(monkeypatch):
     )
     qbo.update_invoice_note.return_value = {}
 
-    tap = MagicMock()
-    tap.create_tap_invoice.return_value = InvoiceResponse(
-        id="inv_x", url="https://tap.test/invoice",
-        status="CREATED", amount=48.0, currency="KWD", tap_customer_id="",
-    )
+    up = MagicMock()
+    up.create_charge.return_value = {
+        "payment_url": "https://apiv2.upayments.com?session_id=sess_x",
+        "charge_id": "sess_x",
+        "status": "ok",
+        "amount": 48.0,
+        "currency": "KWD",
+        "provider": "upayments",
+        "raw": {},
+    }
 
     wa = MagicMock()
     wa.send_payment_link.return_value = MessageResult(to="+96565068000", error="Twilio down")
 
-    result = process_invoice("42", qbo_client=qbo, tap_client=tap, whatsapp_client=wa, settings=settings)
+    result = process_invoice(
+        "42", qbo_client=qbo, upayments_client=up, whatsapp_client=wa, settings=settings
+    )
     assert isinstance(result, LinkResult)
     assert result.whatsapp_sent is False
-    assert result.tap_charge_id == "inv_x"   # payment link still valid
+    assert result.tap_charge_id == "sess_x"   # payment link still valid
 
 
 def test_send_admin_tap_notify_uses_admin_template():
