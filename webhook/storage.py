@@ -4,7 +4,10 @@ Each row represents a single entity change (Invoice Create, Customer Update, etc
 extracted from the notification payload. The full raw JSON is stored on every row
 so nothing is lost even if our parsing logic changes later.
 
-DB path is read from the WEBHOOK_DB_PATH environment variable (default: webhook_events.db).
+DB path is configured via WEBHOOK_DB_PATH environment variable (default: webhook_events.db).
+For Render persistent disk, set WEBHOOK_DB_PATH=/data/webhook_events.db or equivalent.
+Relative paths work for local dev; absolute paths on persistent disk are needed
+to survive Render redeploys (Render filesystem is ephemeral by default).
 """
 from __future__ import annotations
 

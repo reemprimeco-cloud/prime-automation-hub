@@ -33,7 +33,9 @@ class Settings:
     redirect_uri: str
     environment: str
     minor_version: str
-    token_path: str
+    token_path: str  # Path to tokens.json. For Render persistent disk, set QBO_TOKEN_PATH=/data/tokens.json or
+                     # equivalent (e.g. /opt/render/project/data/tokens.json depending on mount point in Render dashboard).
+                     # Relative paths work locally; absolute paths recommended for Render to survive redeploys.
     realm_id: str | None
     webhook_verifier_token: str | None  # required only for the webhook receiver
     # ── Phase 3: Tap Payments + database (default values keep existing tests green) ──
@@ -86,12 +88,22 @@ def get_settings() -> Settings:
         ),
         environment=environment,
         minor_version=os.getenv("QBO_MINOR_VERSION", "75").strip(),
+        # QBO tokens refresh on every use (Intuit rotates them immediately).
+        # On Render's ephemeral filesystem, rotated tokens are lost on redeploy.
+        # To persist tokens across redeploys, mount a persistent disk in Render
+        # and set QBO_TOKEN_PATH to an absolute path on that disk.
+        # Local dev: relative path "tokens.json" is fine.
+        # Render: set QBO_TOKEN_PATH=/data/tokens.json (adjust mount point as needed).
         token_path=os.getenv("QBO_TOKEN_PATH", "tokens.json").strip(),
         realm_id=(os.getenv("QBO_REALM_ID", "").strip() or None),
         webhook_verifier_token=(os.getenv("QBO_WEBHOOK_VERIFIER_TOKEN", "").strip() or None),
         tap_secret_key=(os.getenv("TAP_SECRET_KEY", "").strip() or None),
         tap_redirect_url=os.getenv("TAP_REDIRECT_URL", "http://localhost:8080/payment/success").strip(),
         tap_webhook_url=os.getenv("TAP_WEBHOOK_URL", "http://localhost:8000/webhook/tap").strip(),
+        # Same pattern as token_path: relative path for local dev, absolute path on
+        # Render persistent disk to survive redeploys.
+        # Local dev: "hub.db" is fine.
+        # Render: set DATABASE_PATH=/data/hub.db (adjust mount point as needed).
         database_path=os.getenv("DATABASE_PATH", "hub.db").strip(),
         twilio_account_sid=(os.getenv("TWILIO_ACCOUNT_SID", "").strip() or None),
         twilio_auth_token=(os.getenv("TWILIO_AUTH_TOKEN", "").strip() or None),
