@@ -10,6 +10,7 @@ Handles:
 """
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
@@ -46,6 +47,7 @@ class QuickBooksClient:
             tokens.realm_id = self.settings.realm_id
         self.tokens: TokenData = tokens
         self._session = requests.Session()
+        self._env_reseed_attempted = False
 
     # ----- token management -------------------------------------------------
 
@@ -57,6 +59,37 @@ class QuickBooksClient:
         if self.tokens.is_access_expired():
             self._refresh()
 
+    def _reseed_from_env(self) -> bool:
+        """Overwrite the token file from QBO_TOKENS_JSON and reload it.
+
+        Recovery path for a dead refresh token on disk: Intuit rotates the
+        refresh token on every use, so a rotation lost to a restart leaves the
+        stored token permanently invalid. Reseeding from the env var lets an
+        operator recover by pasting a fresh token in the dashboard, with no
+        shell access needed. Only attempted once per client instance, and only
+        when the env var actually carries a different token.
+        """
+        if self._env_reseed_attempted:
+            return False
+        self._env_reseed_attempted = True
+        if not os.getenv("QBO_TOKENS_JSON", "").strip():
+            return False
+        if not bootstrap_from_env(self.settings.token_path, force=True):
+            return False
+        tokens = load_tokens(self.settings.token_path)
+        if tokens is None:
+            return False
+        if tokens.refresh_token == self.tokens.refresh_token:
+            return False   # same dead token — retrying would fail identically
+        if self.settings.realm_id:
+            tokens.realm_id = self.settings.realm_id
+        self.tokens = tokens
+        _LOG.warning(
+            "qbo_tokens_reseeded_from_env",
+            extra={"token_path": self.settings.token_path},
+        )
+        return True
+
     def _refresh(self) -> None:
         _LOG.info(
             "token_refresh_start",
@@ -66,6 +99,9 @@ class QuickBooksClient:
             self.tokens = refresh_tokens(self.settings, self.tokens)
             save_tokens(self.settings.token_path, self.tokens)
         except Exception as exc:
+            if self._reseed_from_env():
+                self._refresh()
+                return
             _LOG.error("token_refresh_failed", extra={"error": str(exc)})
             detail = str(exc).strip() or type(exc).__name__
             raise NotAuthorizedError(

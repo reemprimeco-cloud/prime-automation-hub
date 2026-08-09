@@ -80,6 +80,16 @@ def decode_qbo_tokens_env() -> str:
     return decoded
 
 
+def force_bootstrap_requested() -> bool:
+    """True if QBO_TOKENS_FORCE_BOOTSTRAP asks us to overwrite the token file."""
+    return os.getenv("QBO_TOKENS_FORCE_BOOTSTRAP", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def bootstrap_from_env(path: str, *, force: bool = False) -> bool:
     """Seed tokens.json from QBO_TOKENS_JSON environment variable.
 
@@ -87,6 +97,12 @@ def bootstrap_from_env(path: str, *, force: bool = False) -> bool:
     is set and tokens.json doesn't exist yet (or force=True), the env var
     content is decoded and written to disk. Normal read/write then proceeds
     via the file.
+
+    Setting QBO_TOKENS_FORCE_BOOTSTRAP=1 in the environment forces the
+    overwrite without a code change or shell access — use it to recover when
+    the token file on the persistent disk holds a dead refresh token. Unset it
+    again after the first successful deploy, otherwise every restart clobbers
+    the rotated token on disk with the (now stale) env var copy.
 
     Returns True if the file was written, False otherwise.
     """
@@ -98,6 +114,8 @@ def bootstrap_from_env(path: str, *, force: bool = False) -> bool:
     env_val = os.getenv("QBO_TOKENS_JSON", "").strip()
     if not env_val:
         return False
+    if force_bootstrap_requested():
+        force = True
     if os.path.exists(path) and not force:
         return False   # file already there — don't overwrite
     try:

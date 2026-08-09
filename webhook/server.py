@@ -11,6 +11,7 @@ Endpoints:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -22,6 +23,7 @@ from urllib.parse import parse_qs
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
+from auth.token_store import force_bootstrap_requested
 from db.payment_links import bootstrap_links_from_file, init_table as init_payment_links_table
 from logging_config import get_logger
 from webhook.payload import parse_qbo_webhook_entities, payload_format_hint
@@ -911,6 +913,24 @@ async def health() -> dict:
     last_qbo_webhook_at = get_last_webhook_received_at()
     webhook_db_path = os.getenv("WEBHOOK_DB_PATH", "webhook_events.db")
 
+    # Which token file the app actually resolved, and a fingerprint of the
+    # refresh token inside it. The fingerprint is a hash, never the token
+    # itself — /health is unauthenticated. Comparing it against the value you
+    # pasted into the dashboard tells you whether the running process picked
+    # up the token you think it did.
+    qbo_token_path = os.getenv("QBO_TOKEN_PATH", "tokens.json")
+    qbo_token_fingerprint = None
+    try:
+        from auth.token_store import load_tokens
+
+        _tokens = load_tokens(qbo_token_path)
+        if _tokens is not None:
+            qbo_token_fingerprint = hashlib.sha256(
+                _tokens.refresh_token.encode("utf-8")
+            ).hexdigest()[:12]
+    except Exception:
+        pass
+
     return {
         "status": "healthy",
         "qbo_webhook_verifier_configured": bool(
@@ -930,4 +950,8 @@ async def health() -> dict:
         ],
         "webhook_db_path": webhook_db_path,
         "webhook_db_exists": os.path.exists(webhook_db_path),
+        "qbo_token_path": qbo_token_path,
+        "qbo_token_file_exists": os.path.exists(qbo_token_path),
+        "qbo_refresh_token_fingerprint": qbo_token_fingerprint,
+        "qbo_force_bootstrap_enabled": force_bootstrap_requested(),
     }

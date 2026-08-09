@@ -331,3 +331,69 @@ def test_get_invoice_pdf_raises_on_error(monkeypatch):
 
     with pytest.raises(QBOError, match="PDF error 404"):
         client.get_invoice_pdf("missing")
+
+
+# ── refresh-token recovery from QBO_TOKENS_JSON ──────────────────────────────
+
+def _dead_tokens() -> TokenData:
+    now = time.time()
+    return TokenData(
+        access_token="access",
+        refresh_token="dead",
+        realm_id="123456789",
+        access_token_expires_at=now - 1,      # forces a refresh
+        refresh_token_expires_at=now + 8_640_000,
+    )
+
+
+def test_refresh_reseeds_from_env_when_disk_token_is_dead(monkeypatch):
+    """A dead refresh token on disk is recovered from QBO_TOKENS_JSON."""
+    monkeypatch.setenv("QBO_TOKENS_JSON", '{"access_token":"a"}')
+    monkeypatch.setattr(qbo_client, "load_tokens", lambda _p: _dead_tokens())
+    client = qbo_client.QuickBooksClient(settings=_settings())
+
+    fresh = _fresh_tokens()
+    fresh.refresh_token = "fresh"
+    calls = []
+
+    def fake_refresh(_settings_arg, tokens):
+        calls.append(tokens.refresh_token)
+        if tokens.refresh_token == "dead":
+            raise RuntimeError("invalid_grant")
+        return fresh
+
+    monkeypatch.setattr(qbo_client, "refresh_tokens", fake_refresh)
+    monkeypatch.setattr(qbo_client, "bootstrap_from_env", lambda _p, force=False: True)
+    monkeypatch.setattr(qbo_client, "load_tokens", lambda _p: fresh)
+    monkeypatch.setattr(qbo_client, "save_tokens", lambda _p, _d: None)
+
+    client._refresh()
+
+    assert calls == ["dead", "fresh"]        # retried with the reseeded token
+    assert client.tokens.refresh_token == "fresh"
+
+
+def test_refresh_does_not_retry_when_env_holds_the_same_dead_token(monkeypatch):
+    """Reseeding an identical token would fail identically — don't loop."""
+    monkeypatch.setenv("QBO_TOKENS_JSON", '{"access_token":"a"}')
+    monkeypatch.setattr(qbo_client, "load_tokens", lambda _p: _dead_tokens())
+    client = qbo_client.QuickBooksClient(settings=_settings())
+
+    calls = []
+
+    def fake_refresh(_settings_arg, tokens):
+        calls.append(tokens.refresh_token)
+        raise RuntimeError("invalid_grant")
+
+    monkeypatch.setattr(qbo_client, "refresh_tokens", fake_refresh)
+    monkeypatch.setattr(qbo_client, "bootstrap_from_env", lambda _p, force=False: True)
+    monkeypatch.setattr(qbo_client, "load_tokens", lambda _p: _dead_tokens())
+
+    try:
+        client._refresh()
+    except qbo_client.NotAuthorizedError:
+        pass
+    else:
+        raise AssertionError("expected NotAuthorizedError")
+
+    assert calls == ["dead"]                 # exactly one attempt, no loop
