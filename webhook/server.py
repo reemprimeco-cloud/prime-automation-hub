@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import time
+from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 from typing import Literal, Optional
@@ -37,6 +38,18 @@ from webhook.storage import (
 from webhook.verify import verify_signature
 
 _LOG = get_logger("webhook.server")
+
+# In-memory delivery counters for the QBO webhook, reset on restart.
+# The stored-event count alone cannot explain a silent endpoint: a rejected
+# signature returns 401 before anything is written, so "Intuit never called us"
+# and "Intuit called us with a token we don't match" look identical. These
+# separate the two.
+_QBO_WEBHOOK_STATS: dict = {
+    "last_request_at": None,
+    "accepted": 0,
+    "rejected_signature": 0,
+    "last_rejected_at": None,
+}
 
 app = FastAPI(title="Prime Automation Hub", version="1.0.0")
 
@@ -246,13 +259,21 @@ async def receive_qbo_webhook(
     """Receive QBO change notification, verify, store, and process Invoice Creates."""
     payload_bytes: bytes = await request.body()
     verifier_token = os.getenv("QBO_WEBHOOK_VERIFIER_TOKEN", "").strip()
+    _QBO_WEBHOOK_STATS["last_request_at"] = datetime.now(timezone.utc).isoformat()
 
     if not verifier_token:
         raise HTTPException(status_code=500, detail="QBO_WEBHOOK_VERIFIER_TOKEN not set")
 
     if not verify_signature(payload_bytes, intuit_signature or "", verifier_token):
-        _LOG.warning("qbo_webhook_invalid_signature")
+        _QBO_WEBHOOK_STATS["rejected_signature"] += 1
+        _QBO_WEBHOOK_STATS["last_rejected_at"] = _QBO_WEBHOOK_STATS["last_request_at"]
+        _LOG.warning(
+            "qbo_webhook_invalid_signature",
+            extra={"signature_present": bool((intuit_signature or "").strip())},
+        )
         raise HTTPException(status_code=401, detail="Invalid intuit-signature")
+
+    _QBO_WEBHOOK_STATS["accepted"] += 1
 
     try:
         payload = json.loads(payload_bytes)
@@ -950,6 +971,7 @@ async def health() -> dict:
         ],
         "webhook_db_path": webhook_db_path,
         "webhook_db_exists": os.path.exists(webhook_db_path),
+        "qbo_webhook_delivery": dict(_QBO_WEBHOOK_STATS),
         "qbo_token_path": qbo_token_path,
         "qbo_token_file_exists": os.path.exists(qbo_token_path),
         "qbo_refresh_token_fingerprint": qbo_token_fingerprint,

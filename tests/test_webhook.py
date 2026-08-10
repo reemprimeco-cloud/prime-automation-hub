@@ -592,3 +592,48 @@ def test_upayments_webhook_ignores_non_captured(web_client, monkeypatch):
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == "ignored"
+
+
+# ── webhook delivery counters ────────────────────────────────────────────────
+
+def test_delivery_counters_distinguish_rejected_from_never_called(web_client):
+    """A 401'd webhook must still be visible — it stores no event."""
+    from webhook.server import _QBO_WEBHOOK_STATS
+
+    _QBO_WEBHOOK_STATS.update(
+        last_request_at=None, accepted=0, rejected_signature=0, last_rejected_at=None
+    )
+
+    # Nothing has called us yet.
+    assert _QBO_WEBHOOK_STATS["last_request_at"] is None
+
+    web_client.post(
+        "/webhook",
+        content=SAMPLE_BYTES,
+        headers={"Content-Type": "application/json", "intuit-signature": "bad"},
+    )
+    # Rejected, so no event stored — but the attempt is now recorded.
+    assert _QBO_WEBHOOK_STATS["rejected_signature"] == 1
+    assert _QBO_WEBHOOK_STATS["accepted"] == 0
+    assert _QBO_WEBHOOK_STATS["last_request_at"] is not None
+    assert _QBO_WEBHOOK_STATS["last_rejected_at"] is not None
+
+    sig, _ = compute_signature(SAMPLE_BYTES, TOKEN)
+    web_client.post(
+        "/webhook",
+        content=SAMPLE_BYTES,
+        headers={"Content-Type": "application/json", "intuit-signature": sig},
+    )
+    assert _QBO_WEBHOOK_STATS["accepted"] == 1
+    assert _QBO_WEBHOOK_STATS["rejected_signature"] == 1
+
+
+def test_health_exposes_delivery_counters(web_client):
+    body = web_client.get("/health").json()
+    assert "qbo_webhook_delivery" in body
+    assert set(body["qbo_webhook_delivery"]) == {
+        "last_request_at",
+        "accepted",
+        "rejected_signature",
+        "last_rejected_at",
+    }
