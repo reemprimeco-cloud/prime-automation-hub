@@ -285,6 +285,24 @@ def handle_payment_capture(
     # ── 4. Update DB ──────────────────────────────────────────────────────────
     db.mark_payment_captured(invoice_id, qbo_payment_id=qbo_payment_id)
 
+    # ── 4b. Admin notification (best-effort) ──────────────────────────────────
+    # Only fires on this fresh-capture path — the ALREADY_CAPTURED branch above
+    # returns before reaching here, so a re-delivered webhook won't double-notify.
+    if whatsapp_client is not None:
+        admin_msg = whatsapp_client.send_admin_payment_received_notify(
+            invoice_number,
+            customer_name or "Customer",
+            link_amount,
+            currency,
+        )
+        if admin_msg.sent:
+            _LOG.info("admin_payment_received_notify_sent", extra={"invoice_id": invoice_id})
+        else:
+            _LOG.warning(
+                "admin_payment_received_notify_failed",
+                extra={"invoice_id": invoice_id, "error": admin_msg.error},
+            )
+
     # ── 5. WhatsApp confirmation (best-effort) ────────────────────────────────
     wa_sent   = False
     wa_number = record.get("whatsapp_to_number") or ""

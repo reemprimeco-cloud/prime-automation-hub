@@ -558,6 +558,9 @@ def test_upayments_webhook_captures_by_invoice_number(web_client, tmp_path, monk
         def send_payment_confirmation(self, *a, **k):
             return MagicMock(sent=True, sid="SM1")
 
+        def send_admin_payment_received_notify(self, *a, **k):
+            return MagicMock(sent=True, sid="SM-ADMIN-1")
+
     monkeypatch.setattr("qbo.client.QuickBooksClient", lambda settings=None: _FakeQBO())
     monkeypatch.setattr(
         "messaging.whatsapp.whatsapp_client_from_settings",

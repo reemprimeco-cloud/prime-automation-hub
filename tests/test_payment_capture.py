@@ -301,3 +301,44 @@ def test_no_whatsapp_client_skips_confirmation(monkeypatch):
     assert isinstance(result, CaptureResult)
     assert result.whatsapp_sent is False
     assert result.qbo_payment_created is True
+
+
+# ── admin payment-received notification ─────────────────────────────────────
+
+def test_fresh_capture_notifies_admin(monkeypatch):
+    """A new capture must tell the admin — that's the gap this covers."""
+    _mock_db(monkeypatch)
+    qbo = _mock_qbo()
+    wa  = _mock_wa()
+
+    handle_payment_capture(CHARGE_ID, 48.0, qbo_client=qbo, whatsapp_client=wa)
+
+    wa.send_admin_payment_received_notify.assert_called_once_with(
+        "2527", "Dar Haa", 48.0, "KWD"
+    )
+
+
+def test_already_captured_does_not_renotify_admin(monkeypatch):
+    """A re-delivered capture webhook must not spam the admin a second time."""
+    _mock_db(monkeypatch, already_captured=True)
+    qbo = _mock_qbo()
+    wa  = _mock_wa()
+
+    handle_payment_capture(CHARGE_ID, 48.0, qbo_client=qbo, whatsapp_client=wa)
+
+    wa.send_admin_payment_received_notify.assert_not_called()
+
+
+def test_admin_notify_failure_does_not_fail_capture(monkeypatch):
+    _mock_db(monkeypatch)
+    qbo = _mock_qbo()
+    wa  = _mock_wa()
+    wa.send_admin_payment_received_notify.return_value = MessageResult(
+        to="+96500000000", error="admin payment-received not configured"
+    )
+
+    result = handle_payment_capture(CHARGE_ID, 48.0, qbo_client=qbo, whatsapp_client=wa)
+
+    assert isinstance(result, CaptureResult)
+    assert result.status == "PAYMENT_CAPTURED"
+    assert result.qbo_payment_created is True

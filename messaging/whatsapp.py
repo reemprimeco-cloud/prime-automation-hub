@@ -67,6 +67,7 @@ class WhatsAppClient:
         admin_tap_sid: str = "",
         admin_bank_sid: str = "",
         admin_missing_phone_sid: str = "",
+        admin_payment_received_sid: str = "",
         admin_phone: str = "",
     ) -> None:
         if not all([account_sid, auth_token, from_number, content_sid]):
@@ -81,6 +82,7 @@ class WhatsAppClient:
         self._admin_tap_sid = admin_tap_sid
         self._admin_bank_sid = admin_bank_sid
         self._admin_missing_phone_sid = admin_missing_phone_sid
+        self._admin_payment_received_sid = admin_payment_received_sid
         self._admin_phone = admin_phone
 
     # ── payment link ──────────────────────────────────────────────────────────
@@ -199,6 +201,29 @@ class WhatsAppClient:
         )
         return self._send(self._admin_phone, self._admin_missing_phone_sid, variables)
 
+    def send_admin_payment_received_notify(
+        self,
+        invoice_number: str,
+        customer_name: str,
+        amount: float,
+        currency: str = "KWD",
+    ) -> MessageResult:
+        """Notify admin that a customer's payment was captured and marked paid in QBO."""
+        if not self._admin_phone or not self._admin_payment_received_sid:
+            return MessageResult(
+                to=self._admin_phone or "", error="admin payment-received not configured"
+            )
+        variables = {
+            "1": invoice_number,
+            "2": customer_name,
+            "3": f"{float(amount):.3f} {currency}",
+        }
+        _LOG.info(
+            "whatsapp_admin_payment_received_notify_attempt",
+            extra={"invoice": invoice_number, "customer": customer_name},
+        )
+        return self._send(self._admin_phone, self._admin_payment_received_sid, variables)
+
     def send_text(self, to_number: str, body: str) -> MessageResult:
         """Send a plain-text WhatsApp message (admin replies)."""
         to = f"whatsapp:{to_number}"
@@ -255,5 +280,6 @@ def whatsapp_client_from_settings(settings) -> WhatsAppClient | None:
         admin_tap_sid=settings.twilio_admin_tap_sid,
         admin_bank_sid=settings.twilio_admin_bank_sid,
         admin_missing_phone_sid=settings.twilio_admin_missing_phone_sid,
+        admin_payment_received_sid=settings.twilio_admin_payment_received_sid,
         admin_phone=settings.twilio_admin_phone,
     )

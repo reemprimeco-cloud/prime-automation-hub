@@ -54,6 +54,7 @@ class Settings:
     twilio_admin_tap_sid: str = ""
     twilio_admin_bank_sid: str = ""
     twilio_admin_missing_phone_sid: str = ""
+    twilio_admin_payment_received_sid: str = ""  # HX... admin "payment received" template SID
     twilio_admin_phone: str = ""
     qbo_bank_payment_method_id: str | None = None
 
@@ -116,6 +117,9 @@ def get_settings() -> Settings:
         twilio_admin_bank_sid=os.getenv("TWILIO_ADMIN_BANK_SID", "").strip(),
         twilio_admin_missing_phone_sid=os.getenv(
             "TWILIO_ADMIN_MISSING_PHONE_CONTENT_SID", ""
+        ).strip(),
+        twilio_admin_payment_received_sid=os.getenv(
+            "TWILIO_ADMIN_PAYMENT_RECEIVED_SID", ""
         ).strip(),
         twilio_admin_phone=os.getenv("TWILIO_ADMIN_PHONE", "").strip(),
         qbo_bank_payment_method_id=(
