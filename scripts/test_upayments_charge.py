@@ -6,6 +6,7 @@ Usage
 -----
     # Ensure .env (or shell env) has:
     #   UPAYMENTS_API_KEY
+    #   UPAYMENTS_API_SECRET   # HMAC signing secret, required since the 2026 rollout
     #   UPAYMENTS_MERCHANT_ID=78508
     #   UPAYMENTS_BASE_URL=https://sandboxapi.upayments.com/api/v1
     #   UPAYMENTS_RETURN_URL=https://prime-automation-hub.onrender.com/payment/success
@@ -66,6 +67,7 @@ def main() -> None:
 
     required = (
         "UPAYMENTS_API_KEY",
+        "UPAYMENTS_API_SECRET",
         "UPAYMENTS_MERCHANT_ID",
         "UPAYMENTS_RETURN_URL",
         "UPAYMENTS_CANCEL_URL",
@@ -75,6 +77,7 @@ def main() -> None:
     print(f"  BASE_URL     {os.getenv('UPAYMENTS_BASE_URL', 'https://sandboxapi.upayments.com/api/v1')}")
     print(f"  MERCHANT_ID  {os.getenv('UPAYMENTS_MERCHANT_ID', '(missing)')}")
     print(f"  API_KEY      {'set' if os.getenv('UPAYMENTS_API_KEY', '').strip() else 'MISSING'}")
+    print(f"  API_SECRET   {'set' if os.getenv('UPAYMENTS_API_SECRET', '').strip() else 'MISSING'}")
     print(f"  amount       {args.amount} {args.currency}")
     print(f"  invoice      {args.invoice}")
     print(f"  customer     {args.name} / {args.phone}")

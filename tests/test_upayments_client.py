@@ -1,8 +1,10 @@
 """Offline unit tests for the UPayments client (no live sandbox calls)."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -16,6 +18,7 @@ def client() -> UPaymentsClient:
     return UPaymentsClient(
         api_key="test-key",
         merchant_id="78508",
+        api_secret="test-api-secret",
         base_url="https://sandboxapi.upayments.com/api/v1",
         return_url="https://example.com/success",
         cancel_url="https://example.com/cancel",
@@ -41,10 +44,11 @@ def test_normalize_phone_e164():
 def test_create_charge_posts_expected_body(client: UPaymentsClient, monkeypatch):
     captured = {}
 
-    def fake_request(method, url, json=None, timeout=None):
+    def fake_request(method, url, data=None, headers=None, timeout=None):
         captured["method"] = method
         captured["url"] = url
-        captured["json"] = json
+        captured["data"] = data
+        captured["headers"] = headers
         resp = MagicMock()
         resp.ok = True
         resp.status_code = 201
@@ -73,7 +77,8 @@ def test_create_charge_posts_expected_body(client: UPaymentsClient, monkeypatch)
 
     assert captured["method"] == "POST"
     assert captured["url"].endswith("/charge")
-    body = captured["json"]
+    body_str = captured["data"].decode("utf-8")
+    body = json.loads(body_str)
     assert body["order"]["amount"] == 1.0
     assert body["order"]["currency"] == "KWD"
     assert body["order"]["id"] == "2555"
@@ -84,9 +89,18 @@ def test_create_charge_posts_expected_body(client: UPaymentsClient, monkeypatch)
     assert result["charge_id"] == "track_abc"
     assert result["provider"] == "upayments"
 
+    # HMAC headers: recompute independently and check for an exact match.
+    timestamp = captured["headers"]["X-Timestamp"]
+    assert timestamp.isdigit()
+    expected_payload = f"{timestamp}POSTcharge{body_str}"
+    expected_sig = base64.b64encode(
+        hmac.new(b"test-api-secret", expected_payload.encode("utf-8"), hashlib.sha256).digest()
+    ).decode("utf-8")
+    assert captured["headers"]["X-Signature"] == expected_sig
+
 
 def test_create_charge_raises_on_http_error(client: UPaymentsClient, monkeypatch):
-    def fake_request(method, url, json=None, timeout=None):
+    def fake_request(method, url, data=None, headers=None, timeout=None):
         resp = MagicMock()
         resp.ok = False
         resp.status_code = 401
@@ -105,7 +119,12 @@ def test_create_charge_raises_on_http_error(client: UPaymentsClient, monkeypatch
 
 
 def test_get_charge_status(client: UPaymentsClient, monkeypatch):
-    def fake_request(method, url, json=None, timeout=None):
+    captured = {}
+
+    def fake_request(method, url, data=None, headers=None, timeout=None):
+        captured["method"] = method
+        captured["data"] = data
+        captured["headers"] = headers
         resp = MagicMock()
         resp.ok = True
         resp.status_code = 200
@@ -117,8 +136,18 @@ def test_get_charge_status(client: UPaymentsClient, monkeypatch):
         return resp
 
     monkeypatch.setattr(client._session, "request", fake_request)
-    data = client.get_charge_status("t1")
-    assert data["data"]["result"] == "CAPTURED"
+    result = client.get_charge_status("t1")
+    assert result["data"]["result"] == "CAPTURED"
+
+    # GET requests sign an empty-string body, per spec, and send no body.
+    assert captured["method"] == "GET"
+    assert captured["data"] is None
+    timestamp = captured["headers"]["X-Timestamp"]
+    expected_payload = f"{timestamp}GETget-payment-status/t1"
+    expected_sig = base64.b64encode(
+        hmac.new(b"test-api-secret", expected_payload.encode("utf-8"), hashlib.sha256).digest()
+    ).decode("utf-8")
+    assert captured["headers"]["X-Signature"] == expected_sig
 
 
 def test_parse_webhook_event_paid(client: UPaymentsClient):
@@ -163,6 +192,7 @@ def test_verify_webhook_signature_no_secret_allows_any_header():
     c = UPaymentsClient(
         api_key="k",
         merchant_id="78508",
+        api_secret="s",
         webhook_secret="",
     )
     assert c.verify_webhook_signature(b"{}", "") is True

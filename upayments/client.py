@@ -13,14 +13,24 @@ Docs:
                  Fields: result, track_id, payment_id, requested_order_id, …
   - Auth:        Authorization: Bearer {UPAYMENTS_API_KEY}
                  Accept + Content-Type: application/json (required)
+  - HMAC (required as of the 2026 rollout, enforced from 2026-12-31 —
+    see https://developers.upayments.com/reference/hmac-authentication):
+      X-Timestamp: unix seconds (UTC)
+      X-Signature: Base64(HMAC-SHA256(timestamp + METHOD + path + body, UPAYMENTS_API_SECRET))
+    `path` is the segment right after /api/v1/ (e.g. "charge"), no domain, no
+    leading slash. `body` is the exact JSON string sent on the wire (empty
+    string for GET). The signature is only valid for 1 minute from the given
+    timestamp, so it must be computed fresh on every request, never cached.
 
 Merchant ID is read from env for config/reconciliation. V2 auth is Bearer-token
 based; the merchant id is not used as the primary auth credential.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
+import json
 import os
 import re
 import time
@@ -82,6 +92,7 @@ class UPaymentsClient:
         api_key: str,
         merchant_id: str,
         *,
+        api_secret: str = "",
         base_url: str = _DEFAULT_BASE_URL,
         return_url: str = "",
         cancel_url: str = "",
@@ -93,9 +104,12 @@ class UPaymentsClient:
             raise UPaymentsAPIError("UPAYMENTS_API_KEY is required but not set.")
         if not merchant_id:
             raise UPaymentsAPIError("UPAYMENTS_MERCHANT_ID is required but not set.")
+        if not api_secret:
+            raise UPaymentsAPIError("UPAYMENTS_API_SECRET is required but not set.")
 
         self._api_key = api_key
         self._merchant_id = merchant_id
+        self._api_secret = api_secret
         self._base_url = base_url.rstrip("/") + "/"
         self._return_url = return_url
         self._cancel_url = cancel_url
@@ -312,6 +326,22 @@ class UPaymentsClient:
     def _url(self, path: str) -> str:
         return urljoin(self._base_url, path.lstrip("/"))
 
+    def _sign(self, method: str, path: str, body_str: str) -> dict[str, str]:
+        """Build the X-Timestamp / X-Signature headers UPayments requires.
+
+        signature = Base64(HMAC-SHA256(timestamp + METHOD + path + body, API_SECRET))
+        `path` is the bare segment after /api/v1/ (no domain, no leading slash)
+        and `body` must be byte-identical to what's actually sent on the wire —
+        computed fresh here, never cached, since it's only valid for 1 minute.
+        """
+        timestamp = str(int(time.time()))
+        payload = f"{timestamp}{method}{path}{body_str}"
+        digest = hmac.new(
+            self._api_secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+        ).digest()
+        signature = base64.b64encode(digest).decode("utf-8")
+        return {"X-Timestamp": timestamp, "X-Signature": signature}
+
     def _request(
         self,
         method: str,
@@ -319,12 +349,19 @@ class UPaymentsClient:
         *,
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        method = method.upper()
         url = self._url(path)
+        # Serialize once: this exact string is both signed and transmitted,
+        # since UPayments validates the signature against the raw body it
+        # receives, not a re-serialized copy — any mismatch fails the request.
+        body_str = json.dumps(json_body, separators=(",", ":")) if json_body is not None else ""
+        sign_headers = self._sign(method, path.lstrip("/"), body_str)
         try:
             resp = self._session.request(
                 method,
                 url,
-                json=json_body,
+                data=body_str.encode("utf-8") if json_body is not None else None,
+                headers=sign_headers,
                 timeout=self._timeout,
             )
         except requests.exceptions.RequestException as exc:
@@ -416,12 +453,15 @@ def upayments_client_from_env(*, webhook_only: bool = False) -> UPaymentsClient:
     """
     api_key = os.getenv("UPAYMENTS_API_KEY", "").strip()
     merchant_id = os.getenv("UPAYMENTS_MERCHANT_ID", "").strip()
+    api_secret = os.getenv("UPAYMENTS_API_SECRET", "").strip()
     if webhook_only:
         api_key = api_key or "webhook-only"
         merchant_id = merchant_id or "0"
+        api_secret = api_secret or "webhook-only"
     return UPaymentsClient(
         api_key=api_key,
         merchant_id=merchant_id,
+        api_secret=api_secret,
         base_url=os.getenv("UPAYMENTS_BASE_URL", _DEFAULT_BASE_URL).strip()
         or _DEFAULT_BASE_URL,
         return_url=os.getenv("UPAYMENTS_RETURN_URL", "").strip(),
