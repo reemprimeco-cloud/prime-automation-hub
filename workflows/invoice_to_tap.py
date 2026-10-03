@@ -173,6 +173,11 @@ def _is_stale_upayments_link(upayments_client: UPaymentsClient, charge_id: str) 
     try:
         data = upayments_client.get_charge_status(charge_id)
     except UPaymentsAPIError as exc:
+        # A fresh link stores only a session_id, which the status API doesn't
+        # know until the customer attempts payment — 404 is the normal case.
+        if exc.status_code == 404:
+            _LOG.info("upayments_link_not_attempted", extra={"charge_id": charge_id})
+            return False
         _LOG.warning(
             "upayments_stale_check_failed",
             extra={"charge_id": charge_id, "error": str(exc)},

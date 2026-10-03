@@ -583,7 +583,8 @@ def test_upayments_webhook_captures_by_invoice_number(web_client, tmp_path, monk
     assert body["qbo_payment_id"] == "PAY-UP-1"
 
 
-def test_upayments_webhook_ignores_non_captured(web_client, monkeypatch):
+def test_upayments_webhook_ignores_non_captured(web_client, tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "hub.db"))
     monkeypatch.setenv("UPAYMENTS_WEBHOOK_SECRET", "expected-token")
     resp = web_client.post(
         "/webhook/upayments",
@@ -595,6 +596,42 @@ def test_upayments_webhook_ignores_non_captured(web_client, monkeypatch):
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == "ignored"
+
+
+def test_upayments_failed_attempt_stores_track_id(web_client, tmp_path, monkeypatch):
+    """A failed attempt swaps the stored session_id for the attempt's track_id."""
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "hub.db"))
+    monkeypatch.setenv("UPAYMENTS_WEBHOOK_SECRET", "expected-token")
+
+    from db import payment_links as db
+
+    db.init_table()
+    db.create_link(
+        invoice_id="inv-1", customer_id="c1", tap_charge_id="session-1",
+        payment_url="https://pay.example/1", amount=1.0,
+        invoice_number="2555", customer_name="X", currency="KWD",
+    )
+    db.create_link(
+        invoice_id="inv-2", customer_id="c2", tap_charge_id="session-2",
+        payment_url="https://pay.example/2", amount=1.0,
+        invoice_number="2556", customer_name="Y", currency="KWD",
+    )
+    db.mark_payment_captured("inv-2", qbo_payment_id="P1")
+
+    for order, track in (("2555", "track-canceled"), ("2556", "track-late")):
+        resp = web_client.post(
+            "/webhook/upayments",
+            content=f"result=CANCELED&track_id={track}&requested_order_id={order}",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "x-notification-token": "expected-token",
+            },
+        )
+        assert resp.status_code == 200
+
+    assert db.get_by_invoice_id("inv-1")["tap_charge_id"] == "track-canceled"
+    # Already-captured links are left alone.
+    assert db.get_by_invoice_id("inv-2")["tap_charge_id"] == "session-2"
 
 
 # ── webhook delivery counters ────────────────────────────────────────────────

@@ -290,6 +290,29 @@ def mark_whatsapp_failed(invoice_id: str, *, error: str) -> None:
     _LOG.warning("whatsapp_marked_failed", extra={"invoice_id": invoice_id})
 
 
+def record_payment_attempt(invoice_number: str, track_id: str) -> bool:
+    """Store a failed attempt's track_id — the only id get-payment-status accepts."""
+    init_table()
+    now = _utcnow()
+    with get_connection() as conn:
+        cur = conn.execute(
+            """
+            UPDATE payment_links
+            SET tap_charge_id = ?, updated_at = ?
+            WHERE invoice_number = ? AND status != 'PAYMENT_CAPTURED'
+            """,
+            (track_id, now, invoice_number),
+        )
+        conn.commit()
+        updated = cur.rowcount > 0
+    if updated:
+        _LOG.info(
+            "payment_attempt_recorded",
+            extra={"invoice_number": invoice_number, "track_id": track_id},
+        )
+    return updated
+
+
 # ── reads ─────────────────────────────────────────────────────────────────────
 
 def delete_by_invoice_id(invoice_id: str) -> bool:

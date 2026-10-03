@@ -484,6 +484,12 @@ async def receive_upayments_webhook(
     )
 
     if event.status != "paid":
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        track_id = str(data.get("track_id") or "").strip()
+        if track_id and event.invoice_number:
+            from db import payment_links as db
+
+            db.record_payment_attempt(event.invoice_number, track_id)
         return {
             "status": "ignored",
             "result": payload.get("result"),

@@ -13,9 +13,10 @@ import pytest
 from config import Settings
 from workflows.invoice_to_tap import (
     LinkResult, SkipResult,
-    _build_private_note, _phone_for_tap, _split_name, _validate_invoice,
-    process_invoice,
+    _build_private_note, _is_stale_upayments_link, _phone_for_tap, _split_name,
+    _validate_invoice, process_invoice,
 )
+from upayments.exceptions import UPaymentsAPIError
 from tap.models import TapPhoneNumber
 from db import payment_links as db_module
 import workflows.invoice_to_tap as wf_module
@@ -124,6 +125,29 @@ class TestPhoneForTap:
         ph = _phone_for_tap(c)
         assert ph.country_code == ""
         assert ph.number == "96181927494"
+
+
+class TestIsStaleUpaymentsLink:
+    def _client(self, *, returns=None, raises=None):
+        up = MagicMock()
+        if raises is not None:
+            up.get_charge_status.side_effect = raises
+        else:
+            up.get_charge_status.return_value = returns
+        return up
+
+    def test_unattempted_session_link_is_reused(self):
+        # Status API 404s on a session_id until the customer tries to pay.
+        up = self._client(raises=UPaymentsAPIError("Transaction not found", status_code=404))
+        assert _is_stale_upayments_link(up, "session-123") is False
+
+    def test_canceled_attempt_is_stale(self):
+        up = self._client(returns={"status": True, "data": {"result": "CANCELED"}})
+        assert _is_stale_upayments_link(up, "track-1") is True
+
+    def test_other_api_errors_keep_existing_link(self):
+        up = self._client(raises=UPaymentsAPIError("upstream down", status_code=503))
+        assert _is_stale_upayments_link(up, "track-1") is False
 
 
 class TestValidateInvoice:
