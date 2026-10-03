@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from db import payment_links as db
 from logging_config import get_logger
 from qbo.client import QBOError, QuickBooksClient
-from qbo.phone import is_kuwait_mobile, normalize
+from qbo.phone import is_valid_mobile, normalize_international
 from tap.models import TapPhoneNumber
 from upayments.client import UPaymentsClient
 from upayments.exceptions import UPaymentsAPIError
@@ -91,14 +91,18 @@ def _validate_invoice(invoice: dict) -> SkipResult | None:
 # ── phone helpers ─────────────────────────────────────────────────────────────
 
 def _phone_for_tap(customer) -> TapPhoneNumber:
-    """Return the best Kuwait mobile number, or empty if none valid.
+    """Return the best WhatsApp-eligible number — Kuwait or any other country.
 
     Name retained for call-site compatibility; used for UPayments + WhatsApp.
+    Kuwait numbers keep the precise mobile/landline check; any other country
+    is accepted on format alone (see qbo.phone.normalize_international).
     """
     for raw in [customer.mobile, customer.phone, customer.alternate_phone]:
-        norm = normalize(raw)
-        if norm and is_kuwait_mobile(norm):      # mobiles only — landlines excluded
-            return TapPhoneNumber(country_code="965", number=norm[4:])
+        norm = normalize_international(raw)
+        if norm and is_valid_mobile(norm):
+            if norm.startswith("+965"):
+                return TapPhoneNumber(country_code="965", number=norm[4:])
+            return TapPhoneNumber(country_code="", number=norm[1:])
     return TapPhoneNumber(country_code="", number="")
 
 
@@ -336,8 +340,8 @@ def process_invoice(
             invoice_id=invoice_id,
             reason="MISSING_PHONE",
             detail=(
-                f"Customer '{customer.display_name}' has no valid Kuwait mobile "
-                "number in QBO — payment link not generated."
+                f"Customer '{customer.display_name}' has no valid WhatsApp-eligible "
+                "phone number in QBO — payment link not generated."
             ),
         )
 

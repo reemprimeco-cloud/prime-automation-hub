@@ -117,6 +117,14 @@ class TestPhoneForTap:
         # 24123456 is a landline — should NOT be returned as Tap phone
         assert ph.country_code == ""
 
+    def test_accepts_non_kuwait_number(self):
+        from qbo.models import Customer
+        # Lebanon mobile, +961 81 927 494
+        c = Customer(id="1", display_name="X", email="", phone="", mobile="+961 81 927 494", alternate_phone="")
+        ph = _phone_for_tap(c)
+        assert ph.country_code == ""
+        assert ph.number == "96181927494"
+
 
 class TestValidateInvoice:
     def test_open_invoice_passes(self):
@@ -347,7 +355,7 @@ class TestProcessInvoice:
         )
         assert isinstance(result, SkipResult)
         assert result.reason == "MISSING_PHONE"
-        assert "no valid Kuwait mobile" in result.detail
+        assert "no valid WhatsApp-eligible phone" in result.detail
         up.create_charge.assert_not_called()
         wa.send_admin_missing_phone_alert.assert_called_once_with(
             "1089", "Ahmed Al-Rashid"

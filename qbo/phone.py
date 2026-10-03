@@ -1,4 +1,8 @@
-"""Kuwait phone number normalization and WhatsApp eligibility validation.
+"""Phone number normalization and WhatsApp eligibility validation.
+
+Kuwait numbers get precise handling (see below). Numbers from any other
+country go through normalize_international() / is_valid_mobile() instead —
+format validation only, no per-country mobile/landline rule.
 
 Normalization
 -------------
@@ -159,6 +163,55 @@ def diagnose_field(raw: str | None) -> tuple[str | None, str]:
 
     # Wrong digit count
     return ("INVALID_LENGTH", "")
+
+
+# ── international (non-Kuwait) support ─────────────────────────────────────
+
+# Rough plausibility bounds on total digit count for any country's E.164
+# number (the ITU allows up to 15; real-world numbers rarely run under 8).
+# Unlike Kuwait, there's no per-country mobile/landline rule here — WhatsApp
+# itself is the backstop, since it simply can't deliver to a landline.
+_MIN_INTL_DIGITS = 8
+_MAX_INTL_DIGITS = 15
+
+
+def normalize_international(raw: str | None) -> str | None:
+    """Normalize any phone number to E.164 — Kuwait or any other country.
+
+    Tries the Kuwait-specific normalize() first, so Kuwait numbers keep their
+    exact existing behavior (an 8-digit local number is still assumed
+    Kuwait). Falls back to generic E.164 formatting for everything else:
+    strip extensions/formatting, treat a leading 00 as the international
+    prefix, and accept the result if its digit count is plausible.
+    """
+    kw = normalize(raw)
+    if kw:
+        return kw
+    if not raw:
+        return None
+
+    cleaned = _EXT_RE.sub("", raw).strip()
+    digits = re.sub(r"\D", "", cleaned)
+    if digits.startswith("00"):
+        digits = digits[2:]
+    if not (_MIN_INTL_DIGITS <= len(digits) <= _MAX_INTL_DIGITS):
+        return None
+    return f"+{digits}"
+
+
+def is_valid_mobile(normalized: str | None) -> bool:
+    """WhatsApp-send eligibility for a number of any country.
+
+    Kuwait numbers keep the strict mobile/landline check (is_kuwait_mobile).
+    Every other country is accepted on format alone — we have no per-country
+    rule to tell a mobile from a landline, so WhatsApp's own delivery is the
+    backstop rather than a guess here.
+    """
+    if not normalized:
+        return False
+    if normalized.startswith(E164_PREFIX):
+        return is_kuwait_mobile(normalized)
+    return True
 
 
 def best_problem(codes: list[str]) -> str:

@@ -6,7 +6,14 @@ All tests are purely offline: no QBO credentials, no network. Run with:
 from __future__ import annotations
 
 import pytest
-from qbo.phone import AuditResult, audit_customer, is_kuwait_mobile, normalize
+from qbo.phone import (
+    AuditResult,
+    audit_customer,
+    is_kuwait_mobile,
+    is_valid_mobile,
+    normalize,
+    normalize_international,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -164,6 +171,50 @@ class TestIsKuwaitMobile:
 
     def test_prefix_4_rejected(self):
         assert is_kuwait_mobile("+96540001234") is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# normalize_international() / is_valid_mobile()
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestNormalizeInternational:
+
+    def test_kuwait_still_goes_through_normalize(self):
+        # Same output as normalize() — the Kuwait path is untouched.
+        assert normalize_international("65068000") == "+96565068000"
+        assert normalize_international("+96565068000") == "+96565068000"
+
+    def test_lebanon_mobile_with_formatting(self):
+        assert normalize_international("+961 81 927 494") == "+96181927494"
+
+    def test_accepts_plain_digits_with_leading_00(self):
+        assert normalize_international("00961819274 94") == "+96181927494"
+
+    def test_rejects_too_short(self):
+        assert normalize_international("+1234") is None
+
+    def test_rejects_too_long(self):
+        assert normalize_international("+1234567890123456") is None
+
+    def test_none_and_empty_rejected(self):
+        assert normalize_international(None) is None
+        assert normalize_international("") is None
+
+
+class TestIsValidMobile:
+
+    def test_kuwait_mobile_accepted(self):
+        assert is_valid_mobile("+96565068000") is True
+
+    def test_kuwait_landline_rejected(self):
+        # Kuwait keeps its strict mobile/landline rule even on this path.
+        assert is_valid_mobile("+96524123456") is False
+
+    def test_lebanon_number_accepted_on_format_alone(self):
+        assert is_valid_mobile("+96181927494") is True
+
+    def test_none_rejected(self):
+        assert is_valid_mobile(None) is False
 
 
 # ═══════════════════════════════════════════════════════════════════════════
