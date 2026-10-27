@@ -330,6 +330,15 @@ def delete_by_invoice_id(invoice_id: str) -> bool:
     return deleted
 
 
+def get_by_id(link_id: str) -> Optional[dict]:
+    """Return a payment link record by its own id, or None."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM payment_links WHERE id = ?", (link_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def get_by_invoice_id(invoice_id: str) -> Optional[dict]:
     """Return the payment link record for a QBO invoice ID, or None."""
     with get_connection() as conn:

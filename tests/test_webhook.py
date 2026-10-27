@@ -677,3 +677,41 @@ def test_health_exposes_delivery_counters(web_client):
         "rejected_signature",
         "last_rejected_at",
     }
+
+
+# ── branded /pay redirect ─────────────────────────────────────────────────────
+
+def _pay_link(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "hub.db"))
+    from db import payment_links as db
+
+    db.init_table()
+    return db, db.create_link(
+        invoice_id="inv-1", customer_id="c1", tap_charge_id="session-1",
+        payment_url="https://apiv2.upayments.com?session_id=session-1", amount=1.0,
+        invoice_number="2669", customer_name="X", currency="KWD",
+    )
+
+
+def test_pay_redirects_to_gateway(web_client, tmp_path, monkeypatch):
+    _, link = _pay_link(tmp_path, monkeypatch)
+    resp = web_client.get(f"/pay/{link['id']}", follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "https://apiv2.upayments.com?session_id=session-1"
+
+
+def test_pay_on_paid_invoice_shows_success(web_client, tmp_path, monkeypatch):
+    db, link = _pay_link(tmp_path, monkeypatch)
+    db.mark_payment_captured("inv-1", qbo_payment_id="P1")
+    resp = web_client.get(f"/pay/{link['id']}", follow_redirects=False)
+    assert resp.status_code == 200
+    assert "Payment successful" in resp.text
+
+
+def test_pay_unknown_or_replaced_link(web_client, tmp_path, monkeypatch):
+    # Invoice numbers must not work as link ids — they're guessable.
+    _pay_link(tmp_path, monkeypatch)
+    for link_id in ("2669", "no-such-link"):
+        resp = web_client.get(f"/pay/{link_id}", follow_redirects=False)
+        assert resp.status_code == 404
+        assert "no longer active" in resp.text

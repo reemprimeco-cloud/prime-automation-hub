@@ -88,6 +88,26 @@ def _validate_invoice(invoice: dict) -> SkipResult | None:
     return None
 
 
+# ── customer-facing links ─────────────────────────────────────────────────────
+
+_HUB_URL = "https://prime-automation-hub.onrender.com"
+
+
+def invoice_pdf_url(settings, invoice_id: str) -> str:
+    return f"{settings.public_base_url or _HUB_URL}/invoice/{invoice_id}/pdf"
+
+
+def customer_payment_url(settings, link_id: str | None, payment_url: str) -> str:
+    """Branded /pay redirect once PUBLIC_BASE_URL is set; the gateway URL until then.
+
+    Keyed on the link's random id, not the invoice number, so the URL can't be
+    guessed by counting.
+    """
+    if settings.public_base_url and link_id:
+        return f"{settings.public_base_url}/pay/{link_id}"
+    return payment_url
+
+
 # ── phone helpers ─────────────────────────────────────────────────────────────
 
 def _phone_for_tap(customer) -> TapPhoneNumber:
@@ -286,7 +306,7 @@ def process_invoice(
     customer_ref    = invoice.get("CustomerRef") or {}
     qbo_customer_id = str(customer_ref.get("value", ""))
     customer_display_name = str(customer_ref.get("name", ""))
-    invoice_link = f"https://prime-automation-hub.onrender.com/invoice/{invoice_id}/pdf"
+    invoice_link = invoice_pdf_url(settings, invoice_id)
 
     # ── 3. Fetch customer ─────────────────────────────────────────────────────
     customer = qbo_client.get_customer_by_id(qbo_customer_id)
@@ -375,7 +395,7 @@ def process_invoice(
     generated_at = datetime.now(timezone.utc).isoformat()
 
     # ── 6. Persist to database ────────────────────────────────────────────────
-    db.create_link(
+    link = db.create_link(
         invoice_id=invoice_id,
         customer_id=qbo_customer_id,
         tap_charge_id=charge_id,
@@ -415,7 +435,7 @@ def process_invoice(
             invoice_number=invoice_number,
             amount=amount_due,
             currency=currency,
-            payment_url=payment_url,
+            payment_url=customer_payment_url(settings, (link or {}).get("id"), payment_url),
             invoice_link=invoice_link,
         )
         if msg.sent:

@@ -95,6 +95,7 @@ def test_handle_resend_action(monkeypatch):
 
     settings = MagicMock()
     settings.bank_transfer_info = ""
+    settings.public_base_url = ""
 
     result = handle_admin_action(
         "RESEND", "2537", qbo_client=qbo, whatsapp_client=wa, settings=settings
@@ -125,6 +126,7 @@ def test_resend_bank_transfer_uses_bank_info(monkeypatch):
 
     settings = MagicMock()
     settings.bank_transfer_info = "NBK | IBAN: KW70..."
+    settings.public_base_url = ""
 
     sent = resend_customer_whatsapp(
         {
@@ -138,3 +140,44 @@ def test_resend_bank_transfer_uses_bank_info(monkeypatch):
     assert sent is True
     _, kwargs = wa.send_payment_link.call_args
     assert "NBK" in kwargs["payment_url"]
+
+
+def test_resend_uses_branded_links_when_configured(monkeypatch):
+    from qbo.models import Customer
+    from messaging.whatsapp import MessageResult
+
+    qbo = MagicMock()
+    qbo.get_customer_by_id.return_value = Customer(
+        id="99", display_name="Coded", email="", phone="",
+        mobile="+96565068000", alternate_phone="",
+    )
+    wa = MagicMock()
+    wa.send_payment_link.return_value = MessageResult(
+        to="+96565068000", sid="SM_x", status="queued"
+    )
+
+    import db.payment_links as db_module
+
+    monkeypatch.setattr(
+        db_module, "get_by_invoice_id",
+        lambda _: {"id": "3f2c9a1e-link", "payment_url": "https://apiv2.upayments.com?session_id=s1"},
+    )
+    monkeypatch.setattr(db_module, "mark_whatsapp_sent", lambda *a, **k: None)
+
+    settings = MagicMock()
+    settings.bank_transfer_info = ""
+    settings.public_base_url = "https://pay.primekw.net"
+
+    sent = resend_customer_whatsapp(
+        {
+            "Id": "42", "DocNumber": "2537", "TotalAmt": 160.0, "Balance": 160.0,
+            "CustomerRef": {"value": "99", "name": "Coded"},
+        },
+        qbo_client=qbo,
+        whatsapp_client=wa,
+        settings=settings,
+    )
+    assert sent is True
+    _, kwargs = wa.send_payment_link.call_args
+    assert kwargs["payment_url"] == "https://pay.primekw.net/pay/3f2c9a1e-link"
+    assert kwargs["invoice_link"] == "https://pay.primekw.net/invoice/42/pdf"

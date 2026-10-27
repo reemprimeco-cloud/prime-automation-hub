@@ -57,6 +57,9 @@ class Settings:
     twilio_admin_payment_received_sid: str = ""  # HX... admin "payment received" template SID
     twilio_admin_phone: str = ""
     qbo_bank_payment_method_id: str | None = None
+    # Branded base URL for customer links, e.g. https://pay.primekw.net. Empty
+    # keeps today's links, so it's safe to deploy before the domain resolves.
+    public_base_url: str = ""
 
     @property
     def api_base_url(self) -> str:
@@ -125,4 +128,5 @@ def get_settings() -> Settings:
         qbo_bank_payment_method_id=(
             os.getenv("QBO_BANK_PAYMENT_METHOD_ID", "").strip() or None
         ),
+        public_base_url=os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/"),
     )

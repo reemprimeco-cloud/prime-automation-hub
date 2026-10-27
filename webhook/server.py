@@ -22,7 +22,7 @@ from typing import Literal, Optional
 from urllib.parse import parse_qs
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, status
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 
 from auth.token_store import force_bootstrap_requested
 from db.payment_links import bootstrap_links_from_file, init_table as init_payment_links_table
@@ -625,7 +625,7 @@ def _payment_result_from_status_payload(status_resp: dict) -> str:
 
 
 def _render_payment_page(
-    status: Literal["success", "failed", "unknown"],
+    status: Literal["success", "failed", "unknown", "inactive"],
 ) -> HTMLResponse:
     """Customer-facing HTML after UPayments redirect (verified server-side)."""
     if status == "success":
@@ -644,7 +644,7 @@ def _render_payment_page(
         accent = "#1f7a4d"
         soft = "#e8f5ee"
         actions = (
-            '<a class="button" href="https://www.primeprint.com.kw">Back to Prime Print</a>'
+            '<a class="button" href="https://primekw.net">Back to Prime Print</a>'
         )
     elif status == "failed":
         title = "Payment not completed — Prime Print"
@@ -659,8 +659,21 @@ def _render_payment_page(
         actions = (
             f'<a class="button" href="{_SUPPORT_WHATSAPP_URL}">Message us on WhatsApp</a>'
             '<div style="margin-top:12px">'
-            '<a href="https://www.primeprint.com.kw" style="color:#5f6f63">Back to Prime Print</a>'
+            '<a href="https://primekw.net" style="color:#5f6f63">Back to Prime Print</a>'
             "</div>"
+        )
+    elif status == "inactive":
+        title = "Payment link no longer active — Prime Print"
+        heading = "This payment link is no longer active"
+        body = (
+            "This link has been replaced, usually because the invoice amount changed. "
+            "Please use the latest link we sent you on WhatsApp, or message us and we will help."
+        )
+        icon = "!"
+        accent = "#334155"
+        soft = "#e2e8f0"
+        actions = (
+            f'<a class="button" href="{_SUPPORT_WHATSAPP_URL}">Message us on WhatsApp</a>'
         )
     else:
         title = "Confirming payment — Prime Print"
@@ -785,6 +798,22 @@ async def payment_success(request: Request) -> HTMLResponse:
 
 
 # ── Invoice PDF proxy ──────────────────────────────────────────────────────────
+
+@app.get("/pay/{link_id}")
+async def redirect_to_payment(link_id: str) -> Response:
+    """Branded payment link: forwards to the UPayments checkout for that link."""
+    from db import payment_links as db
+
+    db.init_table()
+    record = db.get_by_id(link_id)
+    if record is None:
+        page = _render_payment_page(status="inactive")
+        page.status_code = 404
+        return page
+    if record.get("status") == "PAYMENT_CAPTURED":
+        return _render_payment_page(status="success")
+    return RedirectResponse(record["payment_url"], status_code=302)
+
 
 @app.get("/invoice/{invoice_id}/pdf")
 async def get_invoice_pdf(invoice_id: str) -> Response:

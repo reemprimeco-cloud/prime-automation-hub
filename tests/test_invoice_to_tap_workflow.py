@@ -411,3 +411,34 @@ class TestProcessInvoice:
             process_invoice("42", qbo_client=qbo, upayments_client=up, settings=_settings())
 
         assert db_create_called[0] is False   # DB untouched
+
+
+# ── branded customer links (PUBLIC_BASE_URL) ─────────────────────────────────
+
+class TestBrandedCustomerLinks:
+    def _run(self, monkeypatch, settings):
+        from messaging.whatsapp import MessageResult
+
+        qbo, up = _make_workflow_mocks(monkeypatch)
+        monkeypatch.setattr(
+            db_module, "create_link",
+            lambda **kw: {"id": "3f2c9a1e-link", "payment_url": kw["payment_url"]},
+        )
+        monkeypatch.setattr(db_module, "mark_whatsapp_sent", lambda *a, **k: None)
+        wa = MagicMock()
+        wa.send_payment_link.return_value = MessageResult(to="+96565068000", sid="SM1", status="queued")
+        process_invoice("42", qbo_client=qbo, upayments_client=up, whatsapp_client=wa, settings=settings)
+        return wa.send_payment_link.call_args.kwargs
+
+    def test_unset_keeps_todays_links(self, monkeypatch):
+        sent = self._run(monkeypatch, _settings())
+        assert sent["payment_url"] == "https://apiv2.upayments.com?session_id=sess_test_001"
+        assert sent["invoice_link"] == "https://prime-automation-hub.onrender.com/invoice/42/pdf"
+
+    def test_set_sends_branded_links_keyed_on_link_id(self, monkeypatch):
+        from dataclasses import replace
+
+        settings = replace(_settings(), public_base_url="https://pay.primekw.net")
+        sent = self._run(monkeypatch, settings)
+        assert sent["payment_url"] == "https://pay.primekw.net/pay/3f2c9a1e-link"
+        assert sent["invoice_link"] == "https://pay.primekw.net/invoice/42/pdf"

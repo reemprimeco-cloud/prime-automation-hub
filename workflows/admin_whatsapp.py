@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from db import payment_links as db
 from logging_config import get_logger
 from qbo.client import QBOError, QuickBooksClient
-from workflows.invoice_to_tap import _phone_for_tap
+from workflows.invoice_to_tap import _phone_for_tap, customer_payment_url, invoice_pdf_url
 
 _LOG = get_logger("workflow.admin_whatsapp")
 
@@ -40,13 +40,9 @@ def parse_button_payload(body: str, button_payload: str = "") -> tuple[str, str]
     return None
 
 
-def _hub_invoice_pdf_url(invoice_id: str) -> str:
-    return f"https://prime-automation-hub.onrender.com/invoice/{invoice_id}/pdf"
-
-
-def _payment_url_for_invoice(invoice: dict, record: dict | None) -> str:
+def _payment_url_for_invoice(invoice: dict, record: dict | None, settings) -> str:
     if record and record.get("payment_url"):
-        return record["payment_url"]
+        return customer_payment_url(settings, record.get("id"), record["payment_url"])
     note = invoice.get("PrivateNote") or ""
     match = re.search(r"Payment Link:\n(https://[^\n]+)", note)
     return match.group(1) if match else ""
@@ -74,7 +70,7 @@ def resend_customer_whatsapp(
         return False
 
     wa_number = f"+{phone.country_code}{phone.number}"
-    invoice_link = _hub_invoice_pdf_url(invoice_id)
+    invoice_link = invoice_pdf_url(settings, invoice_id)
     is_bank = "BANK_TRANSFER" in (customer.notes or "").upper()
 
     if is_bank:
@@ -91,7 +87,7 @@ def resend_customer_whatsapp(
         )
     else:
         record = db.get_by_invoice_id(invoice_id)
-        payment_url = _payment_url_for_invoice(invoice, record)
+        payment_url = _payment_url_for_invoice(invoice, record, settings)
         if not payment_url:
             return False
         msg = whatsapp_client.send_payment_link(
