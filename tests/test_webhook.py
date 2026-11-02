@@ -715,3 +715,82 @@ def test_pay_unknown_or_replaced_link(web_client, tmp_path, monkeypatch):
         resp = web_client.get(f"/pay/{link_id}", follow_redirects=False)
         assert resp.status_code == 404
         assert "no longer active" in resp.text
+
+
+# ── branded result pages: receipt details + retry ────────────────────────────
+
+class _StatusUP:
+    """Fake UPayments client returning one fixed status, recording new charges."""
+
+    def __init__(self, result, order=""):
+        self.result, self.order, self.created = result, order, []
+
+    def get_charge_status(self, charge_id):
+        tx = {"result": self.result, "track_id": charge_id}
+        if self.order:
+            tx["requested_order_id"] = self.order
+        return {"status": True, "data": {"transaction": tx}}
+
+    def create_charge(self, **kw):
+        self.created.append(kw)
+        return {"payment_url": "https://apiv2.upayments.com?session_id=fresh", "charge_id": "fresh"}
+
+
+def _use_up(monkeypatch, up):
+    monkeypatch.setattr("upayments.client.upayments_client_from_env", lambda **kw: up)
+
+
+def test_success_page_shows_verified_receipt(web_client, tmp_path, monkeypatch):
+    _pay_link(tmp_path, monkeypatch)
+    _use_up(monkeypatch, _StatusUP("CAPTURED", order="2669"))
+    resp = web_client.get("/payment/success?track_id=TRK-777")
+    assert resp.status_code == 200
+    assert resp.headers["cache-control"] == "no-store"
+    for text in ("Payment successful", "تمت عملية الدفع بنجاح", "2669", "1.000 KWD", "TRK-777"):
+        assert text in resp.text
+
+
+def test_receipt_ignores_unverified_order_in_query(web_client, tmp_path, monkeypatch):
+    # The invoice must come from the verified status reply, not the URL.
+    _pay_link(tmp_path, monkeypatch)
+    _use_up(monkeypatch, _StatusUP("CAPTURED"))
+    resp = web_client.get("/payment/success?track_id=TRK-1&requested_order_id=2669")
+    assert "Payment successful" in resp.text
+    assert "1.000 KWD" not in resp.text
+
+
+def test_failed_page_offers_retry_to_same_link(web_client, tmp_path, monkeypatch):
+    _, link = _pay_link(tmp_path, monkeypatch)
+    _use_up(monkeypatch, _StatusUP("CANCELED", order="2669"))
+    resp = web_client.get("/payment/success?track_id=TRK-2")
+    assert "Payment not completed" in resp.text
+    assert f'href="/pay/{link["id"]}"' in resp.text
+    assert "حاول مرة أخرى" in resp.text
+
+
+def test_pay_never_regenerates_when_gateway_says_paid(web_client, tmp_path, monkeypatch):
+    _, link = _pay_link(tmp_path, monkeypatch)
+    up = _StatusUP("CAPTURED")
+    _use_up(monkeypatch, up)
+    resp = web_client.get(f"/pay/{link['id']}", follow_redirects=False)
+    assert resp.status_code == 200
+    assert "Payment successful" in resp.text
+    assert up.created == []
+
+
+def test_pay_after_failed_attempt_creates_fresh_charge(web_client, tmp_path, monkeypatch):
+    db, link = _pay_link(tmp_path, monkeypatch)
+    up = _StatusUP("NOT CAPTURED")
+    _use_up(monkeypatch, up)
+    resp = web_client.get(f"/pay/{link['id']}", follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "https://apiv2.upayments.com?session_id=fresh"
+    assert up.created[0]["invoice_number"] == "2669" and up.created[0]["amount"] == 1.0
+    updated = db.get_by_id(link["id"])
+    assert updated["tap_charge_id"] == "fresh"
+
+
+def test_prime_logo_is_served(web_client):
+    resp = web_client.get("/assets/prime-logo-navy.png")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/png"

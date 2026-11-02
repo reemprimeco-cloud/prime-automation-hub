@@ -313,6 +313,22 @@ def record_payment_attempt(invoice_number: str, track_id: str) -> bool:
     return updated
 
 
+def replace_charge(link_id: str, *, tap_charge_id: str, payment_url: str) -> None:
+    """Point an existing link at a new gateway charge (retry after a failed attempt)."""
+    now = _utcnow()
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE payment_links
+            SET tap_charge_id = ?, payment_url = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (tap_charge_id, payment_url, now, link_id),
+        )
+        conn.commit()
+    _LOG.info("payment_link_charge_replaced", extra={"link_id": link_id, "tap_charge_id": tap_charge_id})
+
+
 # ── reads ─────────────────────────────────────────────────────────────────────
 
 def delete_by_invoice_id(invoice_id: str) -> bool:

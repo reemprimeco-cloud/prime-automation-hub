@@ -16,3 +16,6 @@ logs/
 .DS_Store
 .env.save
 *.db
+
+# Impeccable design-critique reports (local)
+.impeccable/

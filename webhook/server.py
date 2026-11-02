@@ -54,7 +54,6 @@ _QBO_WEBHOOK_STATS: dict = {
 app = FastAPI(title="Prime Automation Hub", version="1.0.0")
 
 _PUBLIC_DIR = Path(__file__).resolve().parent.parent / "public"
-_PAYMENT_SUCCESS_PAGE = _PUBLIC_DIR / "payment" / "success.html"
 _OAUTH_CALLBACK_PAGE = _PUBLIC_DIR / "oauth" / "callback.html"
 
 
@@ -624,107 +623,305 @@ def _payment_result_from_status_payload(status_resp: dict) -> str:
     ).strip()
 
 
+_LOGO_FILE = _PUBLIC_DIR / "brand" / "prime-logo-navy.png"
+
+# Icons share one 24px grid and stroke so the four states read as one set.
+_STATE_ICONS = {
+    "success": '<circle cx="12" cy="12" r="10"/><path class="draw" d="m7.5 12.5 3 3 6-6.5"/>',
+    "failed": '<circle cx="12" cy="12" r="10"/><path d="m9 9 6 6m0-6-6 6"/>',
+    "unknown": '<circle cx="12" cy="12" r="10"/><path d="M12 7v5l3.2 2"/>',
+    "inactive": '<circle cx="12" cy="12" r="10"/><path d="m5.3 18.7 13.4-13.4"/>',
+}
+
+# (English heading, English body, Arabic heading, Arabic body)
+_STATE_COPY = {
+    "success": (
+        "Payment successful",
+        "Thank you. A confirmation is on its way to you on WhatsApp.",
+        "تمت عملية الدفع بنجاح",
+        "شكراً لك، ستصلك رسالة تأكيد عبر واتساب.",
+    ),
+    "failed": (
+        "Payment not completed",
+        "You have not been charged. You can try again, or message us if you need help.",
+        "لم تكتمل عملية الدفع",
+        "لم يتم خصم أي مبلغ. يمكنك المحاولة مرة أخرى، أو التواصل معنا إن احتجت إلى مساعدة.",
+    ),
+    "unknown": (
+        "Confirming your payment",
+        "This can take a minute. We'll message you on WhatsApp once it's confirmed, "
+        "so you can close this page.",
+        "جارٍ تأكيد عملية الدفع",
+        "قد يستغرق ذلك دقيقة. سنرسل لك رسالة عبر واتساب فور التأكيد، ويمكنك إغلاق هذه الصفحة.",
+    ),
+    "inactive": (
+        "This payment link is no longer active",
+        "Please use the latest link we sent you on WhatsApp, or message us and we'll help.",
+        "رابط الدفع هذا لم يعد فعّالاً",
+        "يرجى استخدام آخر رابط أرسلناه لك عبر واتساب، أو تواصل معنا وسنساعدك.",
+    ),
+}
+
+# Values from primekw.net's assets/css/tokens.css, so these pages match the site.
+_PAYMENT_PAGE_CSS = """
+:root {
+  --navy: #10254A; --navy-deep: #08132A; --sky: #7CA5C4; --sky-ink: #3F6F96;
+  --paper: #FFFFFF; --mist: #F4F7F9;
+  --line: rgba(16, 37, 74, .12); --line-strong: rgba(16, 37, 74, .22);
+  --ink: var(--navy-deep); --ink-mid: rgba(8, 19, 42, .6);
+  --ok: #1D7A4F; --warn: #B5730C;
+  --latin: 'Montserrat', system-ui, sans-serif;
+  --arabic: 'GE Dinar Two', 'IBM Plex Sans Arabic', system-ui, sans-serif;
+  --ease-out: cubic-bezier(.2, .7, .2, 1);
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; min-height: 100vh; min-height: 100dvh; background: var(--mist);
+  color: var(--ink); font: 400 15px/1.65 var(--latin);
+  display: flex; flex-direction: column; align-items: center;
+  padding: 32px 16px 28px;
+}
+::selection { background: var(--navy); color: var(--paper); }
+a { color: inherit; text-underline-offset: 4px; text-decoration-thickness: 1px; }
+:focus-visible { outline: 2px solid var(--sky-ink); outline-offset: 3px; border-radius: 2px; }
+[lang="ar"] { font-family: var(--arabic); letter-spacing: 0; }
+
+.brand { display: block; margin-bottom: 26px; }
+.brand img { display: block; height: 44px; width: auto; }
+
+.slip {
+  width: min(100%, 560px); background: var(--paper);
+  border: 1px solid var(--line); border-radius: 4px;
+  box-shadow: 0 22px 44px -26px rgba(16, 37, 74, .35);
+}
+.verdict { padding: 30px 30px 26px; }
+.icon { width: 40px; height: 40px; display: block; margin-bottom: 18px; }
+.icon svg { width: 100%; height: 100%; fill: none; stroke: currentColor;
+  stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.state-success .icon { color: var(--ok); }
+.state-failed .icon { color: var(--warn); }
+.state-unknown .icon { color: var(--sky-ink); }
+.state-inactive .icon { color: var(--ink-mid); }
+
+.copy { display: grid; grid-template-columns: 1fr 1fr; gap: 0 28px; }
+.copy h1 { margin: 0 0 8px; font-weight: 500; font-size: 22px; line-height: 1.25;
+  letter-spacing: -.01em; text-wrap: balance; }
+.copy p { margin: 0; color: var(--ink-mid); max-width: 32ch; }
+.copy [lang="ar"] { text-align: right; }
+.copy [lang="ar"] h1 { font-size: 24px; font-weight: 600; line-height: 1.45; letter-spacing: 0; }
+.copy [lang="ar"] p { font-size: 16px; line-height: 1.8; margin-inline-start: auto; }
+
+.perf { position: relative; border-top: 1px dashed var(--line-strong); }
+.perf::before, .perf::after {
+  content: ""; position: absolute; top: -10px; width: 20px; height: 20px;
+  border-radius: 50%; background: var(--mist); border: 1px solid var(--line);
+}
+.perf::before { left: -11px; clip-path: inset(0 0 0 50%); }
+.perf::after { right: -11px; clip-path: inset(0 50% 0 0); }
+
+.receipt { margin: 0; padding: 18px 30px 6px; }
+.row { display: grid; grid-template-columns: 1fr auto 1fr; align-items: baseline;
+  gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--line); }
+.row:last-child { border-bottom: 0; }
+.row dt { display: contents; }
+.row .label { grid-row: 1; grid-column: 1; }
+.row .label[lang="ar"] { grid-column: 3; }
+.row dd { grid-row: 1; grid-column: 2; }
+.label { font-size: 11px; font-weight: 500; letter-spacing: .16em;
+  text-transform: uppercase; color: var(--ink-mid); }
+.label[lang="ar"] { font-size: 13px; text-transform: none; text-align: right; }
+.row dd { margin: 0; text-align: center; font-weight: 500; font-size: 16px;
+  font-variant-numeric: tabular-nums lining-nums; direction: ltr; }
+.row dd.ref { grid-row: 2; grid-column: 1 / -1; text-align: left; font-size: 12px;
+  font-weight: 400; letter-spacing: .04em; word-break: break-all; padding-top: 2px; }
+
+.actions { padding: 22px 30px 28px; display: grid; gap: 14px; justify-items: start; }
+.button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 12px;
+  min-height: 48px; padding: 12px 26px; border-radius: 2px;
+  background: var(--navy); color: var(--paper); text-decoration: none;
+  font-weight: 500; font-size: 13px; letter-spacing: .16em; text-transform: uppercase;
+  transition: background-color .25s var(--ease-out);
+}
+.button:hover { background: var(--navy-deep); }
+.button [lang="ar"] { font-size: 15px; text-transform: none; }
+.button .sep { width: 5px; height: 5px; background: var(--sky); flex: none; }
+.quiet { font-size: 14px; color: var(--ink-mid); display: inline-flex; gap: 10px;
+  flex-wrap: wrap; align-items: baseline; }
+.quiet a { color: var(--ink); }
+.pair { display: inline-flex; gap: 10px; white-space: nowrap; }
+
+.foot { margin-top: 22px; display: flex; align-items: center; gap: 10px;
+  font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-mid); }
+.foot .mark { width: 7px; height: 7px; background: var(--sky); }
+.foot a { text-decoration: none; }
+.foot a:hover { color: var(--ink); }
+
+.draw { stroke-dasharray: 20; stroke-dashoffset: 20; animation: draw .7s .15s var(--ease-out) forwards; }
+@keyframes draw { to { stroke-dashoffset: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .draw { animation: none; stroke-dashoffset: 0; }
+  .button { transition: none; }
+}
+
+@media (max-width: 560px) {
+  body { padding-top: 22px; }
+  .brand { margin-bottom: 20px; }
+  .brand img { height: 38px; }
+  .verdict { padding: 24px 20px 22px; }
+  .copy { grid-template-columns: 1fr; gap: 18px; }
+  .copy [lang="ar"] { order: -1; }
+  .copy p { max-width: none; }
+  .receipt { padding: 14px 20px 4px; }
+  .actions { padding: 20px 20px 24px; justify-items: stretch; }
+  .button { width: 100%; }
+}
+"""
+
+
+def _receipt_rows(record: dict | None, reference: str) -> str:
+    rows: list[tuple[str, str, str, str]] = []
+    if record:
+        if record.get("invoice_number"):
+            rows.append(("Invoice", str(record["invoice_number"]), "الفاتورة", ""))
+        if record.get("amount") is not None:
+            amount = f"{float(record['amount']):,.3f} {record.get('currency') or 'KWD'}"
+            rows.append(("Amount", amount, "المبلغ", ""))
+    if reference:
+        rows.append(("Reference", reference, "رقم المرجع", "ref"))
+    if not rows:
+        return ""
+    body = "".join(
+        f'<div class="row"><dt><span class="label">{escape(en)}</span>'
+        f'<span class="label" lang="ar" dir="rtl">{escape(ar)}</span></dt>'
+        f'<dd class="{cls}">{escape(value)}</dd></div>'
+        for en, value, ar, cls in rows
+    )
+    return f'<div class="perf" aria-hidden="true"></div><dl class="receipt">{body}</dl>'
+
+
 def _render_payment_page(
     status: Literal["success", "failed", "unknown", "inactive"],
+    *,
+    record: dict | None = None,
+    reference: str = "",
 ) -> HTMLResponse:
-    """Customer-facing HTML after UPayments redirect (verified server-side)."""
+    """Customer-facing result page, bilingual, in primekw.net's brand.
+
+    `record` is the payment_links row and `reference` the gateway reference;
+    pass them only when they come from a verified status check, never from
+    the redirect's query string alone.
+    """
+    en_h, en_p, ar_h, ar_p = _STATE_COPY[status]
+    whatsapp = (
+        f'<span class="pair"><a href="{_SUPPORT_WHATSAPP_URL}">WhatsApp us</a>'
+        '<span aria-hidden="true">·</span>'
+        f'<a lang="ar" dir="rtl" href="{_SUPPORT_WHATSAPP_URL}">تواصل معنا عبر واتساب</a></span>'
+    )
+    whatsapp_button = (
+        f'<a class="button" href="{_SUPPORT_WHATSAPP_URL}"><span>WhatsApp us</span>'
+        '<span class="sep" aria-hidden="true"></span><span lang="ar" dir="rtl">تواصل معنا</span></a>'
+    )
+
     if status == "success":
-        if _PAYMENT_SUCCESS_PAGE.is_file():
-            return HTMLResponse(
-                _PAYMENT_SUCCESS_PAGE.read_text(encoding="utf-8"),
-                media_type="text/html; charset=utf-8",
-            )
-        title = "Payment successful"
-        heading = "Payment successful"
-        body = (
-            "Thank you for your payment. Your invoice will be updated shortly and you "
-            "will receive a confirmation on WhatsApp."
-        )
-        icon = "✓"
-        accent = "#1f7a4d"
-        soft = "#e8f5ee"
         actions = (
-            '<a class="button" href="https://primekw.net">Back to Prime Print</a>'
+            '<p class="quiet"><span>No confirmation after a few minutes?</span>'
+            f"{whatsapp}</p>"
         )
-    elif status == "failed":
-        title = "Payment not completed — Prime Print"
-        heading = "Payment not completed"
-        body = (
-            "Your payment was not completed. No charge was made, or the payment was cancelled. "
-            "If you believe this is an error, please contact us on WhatsApp and we will help."
-        )
-        icon = "!"
-        accent = "#9a3412"
-        soft = "#ffedd5"
+    elif status == "failed" and record and record.get("id"):
         actions = (
-            f'<a class="button" href="{_SUPPORT_WHATSAPP_URL}">Message us on WhatsApp</a>'
-            '<div style="margin-top:12px">'
-            '<a href="https://primekw.net" style="color:#5f6f63">Back to Prime Print</a>'
-            "</div>"
+            f'<a class="button" href="/pay/{escape(str(record["id"]))}"><span>Try again</span>'
+            '<span class="sep" aria-hidden="true"></span>'
+            '<span lang="ar" dir="rtl">حاول مرة أخرى</span></a>'
+            f'<p class="quiet">{whatsapp}</p>'
         )
-    elif status == "inactive":
-        title = "Payment link no longer active — Prime Print"
-        heading = "This payment link is no longer active"
-        body = (
-            "This link has been replaced, usually because the invoice amount changed. "
-            "Please use the latest link we sent you on WhatsApp, or message us and we will help."
-        )
-        icon = "!"
-        accent = "#334155"
-        soft = "#e2e8f0"
-        actions = (
-            f'<a class="button" href="{_SUPPORT_WHATSAPP_URL}">Message us on WhatsApp</a>'
-        )
+    elif status in ("failed", "inactive"):
+        actions = whatsapp_button
     else:
-        title = "Confirming payment — Prime Print"
-        heading = "We're confirming your payment"
-        body = (
-            "We're confirming your payment status. You'll receive a WhatsApp confirmation "
-            "once it is verified. You can safely close this page."
-        )
-        icon = "…"
-        accent = "#334155"
-        soft = "#e2e8f0"
-        actions = (
-            f'<a class="button" href="{_SUPPORT_WHATSAPP_URL}">Message us on WhatsApp</a>'
-        )
+        actions = f'<p class="quiet">{whatsapp}</p>'
+
+    receipt = _receipt_rows(record if status in ("success", "failed") else None, reference)
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>{escape(title)}</title>
-    <style>
-      :root {{ color-scheme: light; --bg:#f4f7f5; --card:#fff; --text:#1a2e1f;
-        --muted:#5f6f63; --accent:{accent}; --accent-soft:{soft}; --border:#d8e3dc; }}
-      * {{ box-sizing: border-box; }}
-      body {{ margin:0; min-height:100vh; display:grid; place-items:center; padding:24px;
-        font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-        background:linear-gradient(180deg,var(--bg) 0%,#e9f0eb 100%); color:var(--text); }}
-      .card {{ width:min(100%,440px); background:var(--card); border:1px solid var(--border);
-        border-radius:16px; padding:32px 28px; box-shadow:0 12px 40px rgba(26,46,31,.08);
-        text-align:center; }}
-      .icon {{ width:72px; height:72px; margin:0 auto 20px; border-radius:50%; display:grid;
-        place-items:center; background:var(--accent-soft); color:var(--accent);
-        font-size:36px; line-height:1; }}
-      h1 {{ margin:0 0 10px; font-size:1.5rem; font-weight:700; }}
-      p {{ margin:0; color:var(--muted); line-height:1.6; }}
-      .actions {{ margin-top:24px; }}
-      a.button {{ display:inline-block; padding:12px 18px; border-radius:999px;
-        background:var(--accent); color:#fff; text-decoration:none; font-weight:600; }}
-    </style>
+    <meta name="theme-color" content="#F4F7F9" />
+    <meta name="robots" content="noindex" />
+    <title>{escape(en_h)} · {escape(ar_h)} — Prime Printing Co.</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600&amp;family=Montserrat:wght@400;500&amp;display=swap" />
+    <style>{_PAYMENT_PAGE_CSS}</style>
   </head>
-  <body>
-    <main class="card">
-      <div class="icon" aria-hidden="true">{escape(icon)}</div>
-      <h1>{escape(heading)}</h1>
-      <p>{escape(body)}</p>
+  <body class="state-{status}">
+    <a class="brand" href="https://primekw.net" aria-label="Prime Printing Co.">
+      <img src="/assets/prime-logo-navy.png" alt="Prime Printing Co." width="720" height="315" />
+    </a>
+    <main class="slip">
+      <section class="verdict">
+        <span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24">{_STATE_ICONS[status]}</svg></span>
+        <div class="copy">
+          <div><h1>{escape(en_h)}</h1><p>{escape(en_p)}</p></div>
+          <div lang="ar" dir="rtl"><h1>{escape(ar_h)}</h1><p>{escape(ar_p)}</p></div>
+        </div>
+      </section>
+      {receipt}
       <div class="actions">{actions}</div>
     </main>
+    <footer class="foot"><span class="mark" aria-hidden="true"></span>
+      <a href="https://primekw.net">Prime Printing Co. · primekw.net</a></footer>
   </body>
 </html>"""
-    return HTMLResponse(html, media_type="text/html; charset=utf-8")
+    return HTMLResponse(
+        html,
+        media_type="text/html; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _verified_order_number(status_resp: dict) -> str:
+    """Our invoice number as echoed back in a verified get-payment-status reply."""
+    data = status_resp.get("data") if isinstance(status_resp.get("data"), dict) else status_resp
+    if not isinstance(data, dict):
+        return ""
+    transaction = data.get("transaction") if isinstance(data.get("transaction"), dict) else {}
+    for source in (transaction, data):
+        for key in ("requested_order_id", "merchant_requested_order_id"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _payment_link_for(track_id: str, session_id: str, status_resp: dict) -> dict | None:
+    """The payment_links row behind a verified redirect, found from trusted ids only."""
+    from db import payment_links as db
+
+    try:
+        db.init_table()
+        for charge_id in (track_id, session_id):
+            if charge_id:
+                record = db.get_by_charge_id(charge_id)
+                if record:
+                    return record
+        order_number = _verified_order_number(status_resp)
+        return db.get_by_invoice_number(order_number) if order_number else None
+    except Exception as exc:
+        _LOG.warning("payment_page_link_lookup_failed", extra={"error": str(exc)})
+        return None
+
+
+@app.get("/assets/prime-logo-navy.png")
+async def prime_logo() -> FileResponse:
+    return FileResponse(
+        _LOGO_FILE,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=604800"},
+    )
 
 
 @app.get("/payment/success")
@@ -765,7 +962,11 @@ async def payment_success(request: Request) -> HTMLResponse:
                 "payment_success_verified",
                 extra={"track_id": charge_id, "result": result},
             )
-            return _render_payment_page(status="success")
+            return _render_payment_page(
+                status="success",
+                record=_payment_link_for(track_id, session_id, status_resp),
+                reference=charge_id,
+            )
 
         if (
             result_upper in _FAILED_REDIRECT_RESULTS
@@ -775,7 +976,10 @@ async def payment_success(request: Request) -> HTMLResponse:
                 "payment_success_route_hit_but_not_paid",
                 extra={"track_id": charge_id, "result": result},
             )
-            return _render_payment_page(status="failed")
+            return _render_payment_page(
+                status="failed",
+                record=_payment_link_for(track_id, session_id, status_resp),
+            )
 
         # PENDING / empty / AUTHORIZED / unknown → never claim success or failure
         _LOG.info(
@@ -811,8 +1015,62 @@ async def redirect_to_payment(link_id: str) -> Response:
         page.status_code = 404
         return page
     if record.get("status") == "PAYMENT_CAPTURED":
-        return _render_payment_page(status="success")
+        return _render_payment_page(status="success", record=record)
+
+    attempt = _latest_attempt(record.get("tap_charge_id") or "")
+    if attempt == "paid":
+        # Captured at the gateway, webhook not processed yet. Never regenerate
+        # here: a fresh charge would let the customer pay twice.
+        return _render_payment_page(status="success", record=record)
+    if attempt == "failed":
+        record = _replace_failed_charge(record) or record
     return RedirectResponse(record["payment_url"], status_code=302)
+
+
+def _latest_attempt(charge_id: str) -> Literal["paid", "failed", "open"]:
+    """Outcome of the stored charge's latest attempt; "open" when unknown or unattempted."""
+    if not charge_id:
+        return "open"
+    try:
+        from upayments.client import upayments_client_from_env
+
+        result = _payment_result_from_status_payload(
+            upayments_client_from_env().get_charge_status(charge_id)
+        ).upper()
+    except Exception:
+        return "open"
+    if result in _PAID_REDIRECT_RESULTS:
+        return "paid"
+    if result in _FAILED_REDIRECT_RESULTS or "NOT CAPTURED" in result:
+        return "failed"
+    return "open"
+
+
+def _replace_failed_charge(record: dict) -> dict | None:
+    """Swap a failed/cancelled charge for a fresh one, keeping the same /pay link."""
+    from db import payment_links as db
+    from upayments.client import upayments_client_from_env
+
+    invoice_number = str(record.get("invoice_number") or record.get("invoice_id") or "")
+    try:
+        charge = upayments_client_from_env().create_charge(
+            amount=float(record["amount"]),
+            currency=str(record.get("currency") or "KWD"),
+            customer_name=str(record.get("customer_name") or ""),
+            customer_phone=str(record.get("whatsapp_to_number") or ""),
+            invoice_number=invoice_number,
+            description=f"Invoice #{invoice_number} — {record.get('customer_name') or ''}".strip(" —"),
+        )
+    except Exception as exc:
+        _LOG.error("pay_retry_charge_failed", extra={"link_id": record.get("id"), "error": str(exc)})
+        return None
+    payment_url = str(charge.get("payment_url") or "")
+    charge_id = str(charge.get("charge_id") or "")
+    if not payment_url or not charge_id:
+        return None
+    db.replace_charge(record["id"], tap_charge_id=charge_id, payment_url=payment_url)
+    _LOG.info("pay_retry_charge_created", extra={"link_id": record.get("id"), "charge_id": charge_id})
+    return db.get_by_id(record["id"])
 
 
 @app.get("/invoice/{invoice_id}/pdf")
