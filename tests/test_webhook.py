@@ -248,7 +248,9 @@ def test_payment_success_page_without_id_is_unknown(web_client):
     assert resp.status_code == 200
     assert "text/html" in resp.headers["content-type"]
     assert "Payment successful" not in resp.text
-    assert "confirming your payment" in resp.text.lower()
+    assert "confirming your payment" not in resp.text.lower()
+    assert "read your payment result" in resp.text
+    assert 'http-equiv="refresh"' not in resp.text
 
 
 def test_payment_success_page_canceled_charge_not_success(web_client, monkeypatch):
@@ -705,7 +707,8 @@ def test_pay_on_paid_invoice_shows_success(web_client, tmp_path, monkeypatch):
     db.mark_payment_captured("inv-1", qbo_payment_id="P1")
     resp = web_client.get(f"/pay/{link['id']}", follow_redirects=False)
     assert resp.status_code == 200
-    assert "Payment successful" in resp.text
+    assert "This invoice is paid" in resp.text
+    assert "/invoice/inv-1/pdf" in resp.text
 
 
 def test_pay_unknown_or_replaced_link(web_client, tmp_path, monkeypatch):
@@ -746,7 +749,10 @@ def test_success_page_shows_verified_receipt(web_client, tmp_path, monkeypatch):
     resp = web_client.get("/payment/success?track_id=TRK-777")
     assert resp.status_code == 200
     assert resp.headers["cache-control"] == "no-store"
-    for text in ("Payment successful", "تمت عملية الدفع بنجاح", "2669", "1.000 KWD", "TRK-777"):
+    for text in (
+        "Payment successful", "تمت عملية الدفع بنجاح", "2669", "1.000 KWD", "TRK-777",
+        "لم تصلك رسالة التأكيد خلال دقائق؟", "/invoice/inv-1/pdf",
+    ):
         assert text in resp.text
 
 
@@ -774,7 +780,7 @@ def test_pay_never_regenerates_when_gateway_says_paid(web_client, tmp_path, monk
     _use_up(monkeypatch, up)
     resp = web_client.get(f"/pay/{link['id']}", follow_redirects=False)
     assert resp.status_code == 200
-    assert "Payment successful" in resp.text
+    assert "This invoice is paid" in resp.text
     assert up.created == []
 
 
@@ -794,3 +800,77 @@ def test_prime_logo_is_served(web_client):
     resp = web_client.get("/assets/prime-logo-navy.png")
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "image/png"
+
+
+def test_success_reference_prefers_gateway_payment_id(web_client, tmp_path, monkeypatch):
+    long_track = "2026120712271028070430349463339291544484955319"
+
+    class _UP(_StatusUP):
+        def get_charge_status(self, charge_id):
+            resp = super().get_charge_status(charge_id)
+            resp["data"]["transaction"]["payment_id"] = "100202612345678"
+            return resp
+
+    _pay_link(tmp_path, monkeypatch)
+    _use_up(monkeypatch, _UP("CAPTURED", order="2669"))
+    resp = web_client.get(f"/payment/success?track_id={long_track}")
+    assert "100202612345678" in resp.text
+    assert long_track not in resp.text
+
+    _use_up(monkeypatch, _StatusUP("CAPTURED", order="2669"))
+    resp = web_client.get(f"/payment/success?track_id={long_track}")
+    assert long_track not in resp.text
+    assert f"…{long_track[-8:]}" in resp.text
+
+
+def test_support_link_is_prefilled_with_invoice(web_client, tmp_path, monkeypatch):
+    from urllib.parse import quote
+
+    _pay_link(tmp_path, monkeypatch)
+    _use_up(monkeypatch, _StatusUP("CANCELED", order="2669"))
+    resp = web_client.get("/payment/success?track_id=TRK-2")
+    assert "wa.me/96565068000?text=" in resp.text
+    assert quote("invoice 2669") in resp.text
+
+
+def test_pending_page_rechecks_with_a_limit(web_client, tmp_path, monkeypatch):
+    _pay_link(tmp_path, monkeypatch)
+    _use_up(monkeypatch, _StatusUP("PENDING", order="2669"))
+    resp = web_client.get("/payment/success?track_id=TRK-3")
+    assert "Confirming your payment" in resp.text
+    assert 'http-equiv="refresh"' in resp.text
+    assert "track_id=TRK-3&amp;n=1" in resp.text
+    assert "تحقق مرة أخرى" in resp.text
+    assert "1.000 KWD" in resp.text  # the record is shown while confirming
+    resp = web_client.get("/payment/success?track_id=TRK-3&n=5")
+    assert 'http-equiv="refresh"' not in resp.text
+    assert 'href="/payment/success?track_id=TRK-3"' in resp.text
+
+
+def test_failed_retry_never_falls_back_to_dead_charge(web_client, tmp_path, monkeypatch):
+    db, link = _pay_link(tmp_path, monkeypatch)
+
+    class _UP(_StatusUP):
+        def create_charge(self, **kw):
+            raise RuntimeError("gateway down")
+
+    _use_up(monkeypatch, _UP("NOT CAPTURED"))
+    resp = web_client.get(f"/pay/{link['id']}", follow_redirects=False)
+    assert resp.status_code == 200
+    assert "start a new attempt" in resp.text
+    assert f'href="/pay/{link["id"]}"' in resp.text
+    assert db.get_by_id(link["id"])["tap_charge_id"] == "session-1"
+
+
+def test_simultaneous_retries_share_one_charge(tmp_path, monkeypatch):
+    db, link = _pay_link(tmp_path, monkeypatch)
+    assert db.replace_charge(link["id"], tap_charge_id="a", payment_url="u-a", expected_charge_id="session-1")
+    # A second retry still holding the old charge id must not overwrite the first.
+    assert not db.replace_charge(link["id"], tap_charge_id="b", payment_url="u-b", expected_charge_id="session-1")
+    assert db.get_by_id(link["id"])["payment_url"] == "u-a"
+
+
+def test_brand_font_route_only_serves_known_files(web_client):
+    assert web_client.get("/assets/fonts/ge-dinar-two-regular.woff2").status_code in (200, 404)
+    assert web_client.get("/assets/fonts/..%2Fprime-logo-navy.png").status_code == 404
+    assert web_client.get("/assets/fonts/other.woff2").status_code == 404

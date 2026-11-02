@@ -313,20 +313,31 @@ def record_payment_attempt(invoice_number: str, track_id: str) -> bool:
     return updated
 
 
-def replace_charge(link_id: str, *, tap_charge_id: str, payment_url: str) -> None:
-    """Point an existing link at a new gateway charge (retry after a failed attempt)."""
+def replace_charge(
+    link_id: str,
+    *,
+    tap_charge_id: str,
+    payment_url: str,
+    expected_charge_id: str | None = None,
+) -> bool:
+    """Point an existing link at a new gateway charge (retry after a failed attempt).
+
+    With `expected_charge_id`, the swap only happens if the link still points at
+    that charge, so two simultaneous retries can't both win. Returns whether the
+    row was updated.
+    """
     now = _utcnow()
+    sql = "UPDATE payment_links SET tap_charge_id = ?, payment_url = ?, updated_at = ? WHERE id = ?"
+    params: list = [tap_charge_id, payment_url, now, link_id]
+    if expected_charge_id is not None:
+        sql += " AND COALESCE(tap_charge_id, '') = ?"
+        params.append(expected_charge_id)
     with get_connection() as conn:
-        conn.execute(
-            """
-            UPDATE payment_links
-            SET tap_charge_id = ?, payment_url = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (tap_charge_id, payment_url, now, link_id),
-        )
+        updated = conn.execute(sql, params).rowcount > 0
         conn.commit()
-    _LOG.info("payment_link_charge_replaced", extra={"link_id": link_id, "tap_charge_id": tap_charge_id})
+    if updated:
+        _LOG.info("payment_link_charge_replaced", extra={"link_id": link_id, "tap_charge_id": tap_charge_id})
+    return updated
 
 
 # ── reads ─────────────────────────────────────────────────────────────────────

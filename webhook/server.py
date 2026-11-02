@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 from typing import Literal, Optional
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote, urlencode
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
@@ -625,41 +625,114 @@ def _payment_result_from_status_payload(status_resp: dict) -> str:
 
 _LOGO_FILE = _PUBLIC_DIR / "brand" / "prime-logo-navy.png"
 
-# Icons share one 24px grid and stroke so the four states read as one set.
-_STATE_ICONS = {
-    "success": '<circle cx="12" cy="12" r="10"/><path class="draw" d="m7.5 12.5 3 3 6-6.5"/>',
-    "failed": '<circle cx="12" cy="12" r="10"/><path d="m9 9 6 6m0-6-6 6"/>',
-    "unknown": '<circle cx="12" cy="12" r="10"/><path d="M12 7v5l3.2 2"/>',
-    "inactive": '<circle cx="12" cy="12" r="10"/><path d="m5.3 18.7 13.4-13.4"/>',
+# GE Dinar Two is self-hosted once the licensed files are dropped into
+# public/brand/fonts/ (woff2 preferred); until then the page falls back to
+# IBM Plex Sans Arabic from Google Fonts.
+_FONT_DIR = _PUBLIC_DIR / "brand" / "fonts"
+_ARABIC_BRAND_FONTS = {400: "ge-dinar-two-regular", 500: "ge-dinar-two-medium"}
+_FONT_FORMATS = {".woff2": "woff2", ".woff": "woff", ".otf": "opentype", ".ttf": "truetype"}
+
+PaymentState = Literal[
+    "success",      # verified paid, arriving from the gateway
+    "paid",         # verified paid, reopened from the /pay link
+    "failed",       # verified not paid
+    "retry_error",  # verified not paid, and we could not start a fresh attempt
+    "unknown",      # we have a charge id but no final answer yet
+    "unreadable",   # we were given nothing to check
+    "inactive",     # unknown /pay link
+]
+
+# Status re-checks on the "confirming" page: every 8s, at most 5 times.
+_RECHECK_SECONDS = 8
+_RECHECK_LIMIT = 5
+
+_ICON_PATHS = {
+    "check": '<circle cx="12" cy="12" r="10"/><path class="draw" d="m7.5 12.5 3 3 6-6.5"/>',
+    "cross": '<circle cx="12" cy="12" r="10"/><path d="m9 9 6 6m0-6-6 6"/>',
+    "clock": '<circle cx="12" cy="12" r="10"/><path d="M12 7v5l3.2 2"/>',
+    "question": '<circle cx="12" cy="12" r="10"/><path d="M9.6 9.4a2.5 2.5 0 0 1 4.8 1c0 1.7-2.4 2.1-2.4 3.6"/><path d="M12 17.2h.01"/>',
+    "renew": '<circle cx="12" cy="12" r="10"/><path d="M16 12a4 4 0 1 1-1.2-2.85"/><path d="M15.2 6.6v2.9h-2.9"/>',
+}
+_STATE_ICON = {
+    "success": "check", "paid": "check", "failed": "cross", "retry_error": "cross",
+    "unknown": "clock", "unreadable": "question", "inactive": "renew",
+}
+_STATE_TONE = {
+    "success": "ok", "paid": "ok", "failed": "warn", "retry_error": "warn",
+    "unknown": "info", "unreadable": "info", "inactive": "muted",
 }
 
-# (English heading, English body, Arabic heading, Arabic body)
+# (EN heading, EN lead, EN rest, AR heading, AR lead, AR rest). The lead is
+# the sentence the customer most needs, so it's set in full ink.
 _STATE_COPY = {
     "success": (
         "Payment successful",
-        "Thank you. A confirmation is on its way to you on WhatsApp.",
+        "Thank you, we've received your payment.",
+        "A confirmation is on its way to you on WhatsApp.",
         "تمت عملية الدفع بنجاح",
-        "شكراً لك، ستصلك رسالة تأكيد عبر واتساب.",
+        "شكراً لك، تم استلام دفعتك.",
+        "ستصلك رسالة تأكيد عبر واتساب.",
+    ),
+    "paid": (
+        "This invoice is paid",
+        "Thank you, we've received your payment.",
+        "There's nothing more to do on this link.",
+        "تم دفع هذه الفاتورة",
+        "شكراً لك، تم استلام دفعتك.",
+        "لا حاجة لأي إجراء آخر على هذا الرابط.",
     ),
     "failed": (
         "Payment not completed",
-        "You have not been charged. You can try again, or message us if you need help.",
+        "You have not been charged.",
+        "You can try again, or message us if you need help.",
         "لم تكتمل عملية الدفع",
-        "لم يتم خصم أي مبلغ. يمكنك المحاولة مرة أخرى، أو التواصل معنا إن احتجت إلى مساعدة.",
+        "لم يتم خصم أي مبلغ.",
+        "يمكنك المحاولة مرة أخرى، أو التواصل معنا إن احتجت إلى مساعدة.",
+    ),
+    "retry_error": (
+        "We couldn't start a new attempt",
+        "You have not been charged.",
+        "Please try again in a minute, or message us and we'll help.",
+        "تعذّر بدء محاولة دفع جديدة",
+        "لم يتم خصم أي مبلغ.",
+        "يرجى المحاولة بعد دقيقة، أو التواصل معنا وسنساعدك.",
     ),
     "unknown": (
         "Confirming your payment",
-        "This can take a minute. We'll message you on WhatsApp once it's confirmed, "
-        "so you can close this page.",
+        "This can take a minute.",
+        "Once it's confirmed we'll message you on WhatsApp. "
+        "If you don't hear from us within 10 minutes, please message us.",
         "جارٍ تأكيد عملية الدفع",
-        "قد يستغرق ذلك دقيقة. سنرسل لك رسالة عبر واتساب فور التأكيد، ويمكنك إغلاق هذه الصفحة.",
+        "قد يستغرق ذلك دقيقة.",
+        "سنرسل لك رسالة عبر واتساب فور التأكيد، وإن لم تصلك خلال 10 دقائق يرجى التواصل معنا.",
+    ),
+    "unreadable": (
+        "We couldn't read your payment result",
+        "If you completed the payment, a WhatsApp confirmation will reach you shortly.",
+        "If it doesn't, open your payment link again or message us.",
+        "تعذّرت قراءة نتيجة الدفع",
+        "إذا أكملت عملية الدفع فستصلك رسالة تأكيد عبر واتساب قريباً.",
+        "وإن لم تصلك، افتح رابط الدفع مرة أخرى أو تواصل معنا.",
     ),
     "inactive": (
         "This payment link is no longer active",
-        "Please use the latest link we sent you on WhatsApp, or message us and we'll help.",
-        "رابط الدفع هذا لم يعد فعّالاً",
-        "يرجى استخدام آخر رابط أرسلناه لك عبر واتساب، أو تواصل معنا وسنساعدك.",
+        "This link has been replaced or has expired.",
+        "Please use the most recent payment link we sent you on WhatsApp, or message us and we'll help.",
+        "رابط الدفع هذا لم يعد صالحاً",
+        "تم استبدال هذا الرابط أو انتهت صلاحيته.",
+        "يرجى استخدام أحدث رابط دفع أرسلناه لك عبر واتساب، أو التواصل معنا وسنساعدك.",
     ),
+}
+
+# What the prefilled WhatsApp message is about, per state.
+_SUPPORT_TOPIC = {
+    "success": ("payment confirmation", "تأكيد الدفع"),
+    "paid": ("payment confirmation", "تأكيد الدفع"),
+    "failed": ("payment problem", "مشكلة في الدفع"),
+    "retry_error": ("payment problem", "مشكلة في الدفع"),
+    "unknown": ("payment status", "حالة الدفع"),
+    "unreadable": ("payment status", "حالة الدفع"),
+    "inactive": ("payment link", "رابط الدفع"),
 }
 
 # Values from primekw.net's assets/css/tokens.css, so these pages match the site.
@@ -668,13 +741,18 @@ _PAYMENT_PAGE_CSS = """
   --navy: #10254A; --navy-deep: #08132A; --sky: #7CA5C4; --sky-ink: #3F6F96;
   --paper: #FFFFFF; --mist: #F4F7F9;
   --line: rgba(16, 37, 74, .12); --line-strong: rgba(16, 37, 74, .22);
-  --ink: var(--navy-deep); --ink-mid: rgba(8, 19, 42, .6);
+  --ink: var(--navy-deep); --ink-mid: rgba(8, 19, 42, .64);
   --ok: #1D7A4F; --warn: #B5730C;
   --latin: 'Montserrat', system-ui, sans-serif;
   --arabic: 'GE Dinar Two', 'IBM Plex Sans Arabic', system-ui, sans-serif;
   --ease-out: cubic-bezier(.2, .7, .2, 1);
+  --tone: var(--sky-ink);
   color-scheme: light;
 }
+.tone-ok { --tone: var(--ok); }
+.tone-warn { --tone: var(--warn); }
+.tone-info { --tone: var(--sky-ink); }
+.tone-muted { --tone: var(--ink-mid); }
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
 body {
@@ -693,25 +771,23 @@ a { color: inherit; text-underline-offset: 4px; text-decoration-thickness: 1px; 
 
 .slip {
   width: min(100%, 560px); background: var(--paper);
-  border: 1px solid var(--line); border-radius: 4px;
+  border: 1px solid var(--line); border-top: 3px solid var(--tone); border-radius: 4px;
   box-shadow: 0 22px 44px -26px rgba(16, 37, 74, .35);
 }
-.verdict { padding: 30px 30px 26px; }
-.icon { width: 40px; height: 40px; display: block; margin-bottom: 18px; }
+.verdict { padding: 28px 30px 26px; }
+.icon { width: 40px; height: 40px; display: block; margin-bottom: 18px; color: var(--tone); }
 .icon svg { width: 100%; height: 100%; fill: none; stroke: currentColor;
   stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
-.state-success .icon { color: var(--ok); }
-.state-failed .icon { color: var(--warn); }
-.state-unknown .icon { color: var(--sky-ink); }
-.state-inactive .icon { color: var(--ink-mid); }
 
-.copy { display: grid; grid-template-columns: 1fr 1fr; gap: 0 28px; }
+/* Arabic leads in source order; on wide screens it sits in the right-hand column. */
+.copy { display: grid; grid-template-columns: 1fr 1fr; gap: 0 28px; direction: rtl; }
+.copy > div { min-width: 0; }
 .copy h1 { margin: 0 0 8px; font-weight: 500; font-size: 22px; line-height: 1.25;
   letter-spacing: -.01em; text-wrap: balance; }
-.copy p { margin: 0; color: var(--ink-mid); max-width: 32ch; }
-.copy [lang="ar"] { text-align: right; }
-.copy [lang="ar"] h1 { font-size: 24px; font-weight: 600; line-height: 1.45; letter-spacing: 0; }
-.copy [lang="ar"] p { font-size: 16px; line-height: 1.8; margin-inline-start: auto; }
+.copy p { margin: 0; color: var(--ink-mid); max-width: 34ch; text-wrap: pretty; }
+.copy strong { color: var(--ink); font-weight: 500; }
+.copy [lang="ar"] h1 { font-size: 24px; line-height: 1.45; letter-spacing: 0; }
+.copy [lang="ar"] p { font-size: 16px; line-height: 1.8; }
 
 .perf { position: relative; border-top: 1px dashed var(--line-strong); }
 .perf::before, .perf::after {
@@ -734,24 +810,39 @@ a { color: inherit; text-underline-offset: 4px; text-decoration-thickness: 1px; 
 .label[lang="ar"] { font-size: 13px; text-transform: none; text-align: right; }
 .row dd { margin: 0; text-align: center; font-weight: 500; font-size: 16px;
   font-variant-numeric: tabular-nums lining-nums; direction: ltr; }
-.row dd.ref { grid-row: 2; grid-column: 1 / -1; text-align: left; font-size: 12px;
-  font-weight: 400; letter-spacing: .04em; word-break: break-all; padding-top: 2px; }
+.row dd.ref { font-size: 13px; font-weight: 400; letter-spacing: .06em; color: var(--ink-mid); }
 
-.actions { padding: 22px 30px 28px; display: grid; gap: 14px; justify-items: start; }
-.button {
+.actions { padding: 22px 30px 26px; display: grid; gap: 10px; }
+.button, .ghost {
   display: inline-flex; align-items: center; justify-content: center; gap: 12px;
-  min-height: 48px; padding: 12px 26px; border-radius: 2px;
-  background: var(--navy); color: var(--paper); text-decoration: none;
+  min-height: 48px; padding: 12px 26px; border-radius: 2px; text-decoration: none;
   font-weight: 500; font-size: 13px; letter-spacing: .16em; text-transform: uppercase;
-  transition: background-color .25s var(--ease-out);
+  transition: background-color .25s var(--ease-out), border-color .25s var(--ease-out);
 }
+.button { background: var(--navy); color: var(--paper); }
 .button:hover { background: var(--navy-deep); }
-.button [lang="ar"] { font-size: 15px; text-transform: none; }
-.button .sep { width: 5px; height: 5px; background: var(--sky); flex: none; }
-.quiet { font-size: 14px; color: var(--ink-mid); display: inline-flex; gap: 10px;
-  flex-wrap: wrap; align-items: baseline; }
-.quiet a { color: var(--ink); }
-.pair { display: inline-flex; gap: 10px; white-space: nowrap; }
+.ghost { border: 1px solid var(--line-strong); color: var(--ink); }
+.ghost:hover { border-color: var(--navy); }
+.button [lang="ar"], .ghost [lang="ar"] { font-size: 15px; text-transform: none; }
+.button > span, .ghost > span, .support > span { white-space: nowrap; }
+.sep { width: 5px; height: 5px; background: var(--sky); flex: none; }
+
+.prompt { margin: 6px 0 0; font-size: 14px; color: var(--ink-mid); text-align: center; }
+.prompt > span { display: inline-block; }
+.prompt [lang="ar"] { font-size: 15px; }
+.support {
+  display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap;
+  min-height: 44px; padding: 6px 4px; font-size: 14px; font-weight: 500; color: var(--ink);
+  text-decoration: underline; text-decoration-color: var(--line-strong);
+}
+.support:hover { text-decoration-color: currentColor; }
+.support [lang="ar"] { font-size: 15px; }
+.support .sep { width: 4px; height: 4px; }
+.status { margin: 0; display: flex; align-items: center; justify-content: center; gap: 10px;
+  font-size: 13px; color: var(--ink-mid); }
+.status .pulse { width: 6px; height: 6px; background: var(--sky-ink);
+  animation: pulse 1.6s var(--ease-out) infinite; }
+@keyframes pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
 
 .foot { margin-top: 22px; display: flex; align-items: center; gap: 10px;
   font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-mid); }
@@ -763,7 +854,8 @@ a { color: inherit; text-underline-offset: 4px; text-decoration-thickness: 1px; 
 @keyframes draw { to { stroke-dashoffset: 0; } }
 @media (prefers-reduced-motion: reduce) {
   .draw { animation: none; stroke-dashoffset: 0; }
-  .button { transition: none; }
+  .status .pulse { animation: none; opacity: 1; }
+  .button, .ghost { transition: none; }
 }
 
 @media (max-width: 560px) {
@@ -771,26 +863,64 @@ a { color: inherit; text-underline-offset: 4px; text-decoration-thickness: 1px; 
   .brand { margin-bottom: 20px; }
   .brand img { height: 38px; }
   .verdict { padding: 24px 20px 22px; }
+  .icon { margin-left: auto; }
   .copy { grid-template-columns: 1fr; gap: 18px; }
-  .copy [lang="ar"] { order: -1; }
   .copy p { max-width: none; }
   .receipt { padding: 14px 20px 4px; }
-  .actions { padding: 20px 20px 24px; justify-items: stretch; }
-  .button { width: 100%; }
+  .actions { padding: 20px 20px 22px; }
+  .button, .ghost { padding: 12px 16px; letter-spacing: .1em; }
+  .prompt .dot { display: none; }
+  .prompt > span { display: block; }
 }
 """
 
 
-def _receipt_rows(record: dict | None, reference: str) -> str:
+def _arabic_font_faces() -> str:
+    """@font-face rules for whichever GE Dinar Two files are present."""
+    rules = []
+    for weight, stem in _ARABIC_BRAND_FONTS.items():
+        for ext, fmt in _FONT_FORMATS.items():
+            if (_FONT_DIR / f"{stem}{ext}").is_file():
+                rules.append(
+                    "@font-face { font-family: 'GE Dinar Two'; font-style: normal; "
+                    f"font-weight: {weight}; font-display: swap; "
+                    f"src: url('/assets/fonts/{stem}{ext}') format('{fmt}'); }}"
+                )
+                break
+    return "\n".join(rules)
+
+
+def _payment_reference(status_resp: dict, charge_id: str) -> tuple[str, str, str]:
+    """(EN label, AR label, value) for the receipt's reference row, or empty.
+
+    Prefers the gateway's payment/receipt id, the number a customer can match to
+    their bank. Falls back to the tail of the track id, which only support needs.
+    """
+    data = status_resp.get("data") if isinstance(status_resp.get("data"), dict) else status_resp
+    data = data if isinstance(data, dict) else {}
+    transaction = data.get("transaction") if isinstance(data.get("transaction"), dict) else {}
+    for key in ("payment_id", "receipt_id", "ref", "tran_id"):
+        value = str(transaction.get(key) or "").strip()
+        if value and value != charge_id:
+            return ("Payment ID", "رقم العملية", value)
+    charge_id = (charge_id or "").strip()
+    if not charge_id:
+        return ("", "", "")
+    short = charge_id if len(charge_id) <= 12 else f"…{charge_id[-8:]}"
+    return ("Reference", "رقم المرجع", short)
+
+
+def _receipt_rows(record: dict | None, reference: tuple[str, str, str]) -> str:
     rows: list[tuple[str, str, str, str]] = []
     if record:
         if record.get("invoice_number"):
-            rows.append(("Invoice", str(record["invoice_number"]), "الفاتورة", ""))
+            rows.append(("Invoice", str(record["invoice_number"]), "رقم الفاتورة", ""))
         if record.get("amount") is not None:
             amount = f"{float(record['amount']):,.3f} {record.get('currency') or 'KWD'}"
             rows.append(("Amount", amount, "المبلغ", ""))
-    if reference:
-        rows.append(("Reference", reference, "رقم المرجع", "ref"))
+    ref_en, ref_ar, ref_value = reference
+    if ref_value:
+        rows.append((ref_en, ref_value, ref_ar, "ref"))
     if not rows:
         return ""
     body = "".join(
@@ -802,47 +932,94 @@ def _receipt_rows(record: dict | None, reference: str) -> str:
     return f'<div class="perf" aria-hidden="true"></div><dl class="receipt">{body}</dl>'
 
 
+def _support_url(status: str, record: dict | None) -> str:
+    """WhatsApp link with the invoice and topic already typed in."""
+    topic_en, topic_ar = _SUPPORT_TOPIC[status]
+    invoice = str((record or {}).get("invoice_number") or "").strip()
+    if invoice:
+        text = f"Hello, invoice {invoice}: {topic_en}\nمرحباً، الفاتورة {invoice}: {topic_ar}"
+    else:
+        text = f"Hello, about my {topic_en}\nمرحباً، بخصوص {topic_ar}"
+    return f"{_SUPPORT_WHATSAPP_URL}?text={quote(text)}"
+
+
+def _pair(en: str, ar: str) -> str:
+    return (
+        f"<span>{escape(en)}</span><span class=\"sep\" aria-hidden=\"true\"></span>"
+        f'<span lang="ar" dir="rtl">{escape(ar)}</span>'
+    )
+
+
 def _render_payment_page(
-    status: Literal["success", "failed", "unknown", "inactive"],
+    status: PaymentState,
     *,
     record: dict | None = None,
-    reference: str = "",
+    reference: tuple[str, str, str] = ("", "", ""),
+    check_url: str = "",
+    recheck_url: str = "",
 ) -> HTMLResponse:
     """Customer-facing result page, bilingual, in primekw.net's brand.
 
-    `record` is the payment_links row and `reference` the gateway reference;
-    pass them only when they come from a verified status check, never from
-    the redirect's query string alone.
+    `record` is the payment_links row and `reference` the receipt reference;
+    pass them only when they come from a verified status check or our own
+    database, never from the redirect's query string alone. On the "unknown"
+    page, `check_url` backs the "Check again" button and `recheck_url`, when
+    set, makes the page re-check on its own.
     """
-    en_h, en_p, ar_h, ar_p = _STATE_COPY[status]
-    whatsapp = (
-        f'<span class="pair"><a href="{_SUPPORT_WHATSAPP_URL}">WhatsApp us</a>'
-        '<span aria-hidden="true">·</span>'
-        f'<a lang="ar" dir="rtl" href="{_SUPPORT_WHATSAPP_URL}">تواصل معنا عبر واتساب</a></span>'
+    en_h, en_lead, en_rest, ar_h, ar_lead, ar_rest = _STATE_COPY[status]
+    support_url = escape(_support_url(status, record))
+    support_link = (
+        f'<a class="support" href="{support_url}">'
+        f'{_pair("WhatsApp us", "تواصل معنا عبر واتساب")}</a>'
     )
-    whatsapp_button = (
-        f'<a class="button" href="{_SUPPORT_WHATSAPP_URL}"><span>WhatsApp us</span>'
-        '<span class="sep" aria-hidden="true"></span><span lang="ar" dir="rtl">تواصل معنا</span></a>'
+    support_button = f'<a class="button" href="{support_url}">{_pair("WhatsApp us", "تواصل معنا")}</a>'
+    link_id = escape(str((record or {}).get("id") or ""))
+    invoice_id = str((record or {}).get("invoice_id") or "").strip()
+    download = (
+        f'<a class="ghost" href="/invoice/{escape(quote(invoice_id, safe=""))}/pdf">'
+        f'{_pair("Download invoice", "تحميل الفاتورة")}</a>'
+        if invoice_id
+        else ""
     )
 
     if status == "success":
         actions = (
-            '<p class="quiet"><span>No confirmation after a few minutes?</span>'
-            f"{whatsapp}</p>"
+            f"{download}"
+            '<p class="prompt"><span>No confirmation after a few minutes?</span> <span class="dot" aria-hidden="true">·</span> '
+            '<span lang="ar" dir="rtl">لم تصلك رسالة التأكيد خلال دقائق؟</span></p>'
+            f"{support_link}"
         )
-    elif status == "failed" and record and record.get("id"):
+    elif status == "paid":
+        actions = f"{download}{support_link}"
+    elif status in ("failed", "retry_error") and link_id:
         actions = (
-            f'<a class="button" href="/pay/{escape(str(record["id"]))}"><span>Try again</span>'
-            '<span class="sep" aria-hidden="true"></span>'
-            '<span lang="ar" dir="rtl">حاول مرة أخرى</span></a>'
-            f'<p class="quiet">{whatsapp}</p>'
+            f'<a class="button" href="/pay/{link_id}">{_pair("Try again", "حاول مرة أخرى")}</a>'
+            f"{support_link}"
         )
-    elif status in ("failed", "inactive"):
-        actions = whatsapp_button
+    elif status == "unknown":
+        actions = ""
+        if recheck_url:
+            actions += (
+                '<p class="status" role="status"><span class="pulse" aria-hidden="true"></span>'
+                '<span>Checking again automatically</span> · '
+                '<span lang="ar" dir="rtl">نتحقق تلقائياً</span></p>'
+            )
+        if check_url:
+            actions += f'<a class="button" href="{escape(check_url)}">{_pair("Check again", "تحقق مرة أخرى")}</a>'
+        actions += support_link
     else:
-        actions = f'<p class="quiet">{whatsapp}</p>'
+        actions = support_button
 
-    receipt = _receipt_rows(record if status in ("success", "failed") else None, reference)
+    receipt = _receipt_rows(record if status != "inactive" else None, reference)
+    refresh = (
+        f'<meta http-equiv="refresh" content="{_RECHECK_SECONDS};url={escape(recheck_url)}" />'
+        if recheck_url
+        else ""
+    )
+    fonts_href = (
+        "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500"
+        "&amp;family=Montserrat:wght@400;500&amp;display=swap"
+    )
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -851,22 +1028,24 @@ def _render_payment_page(
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#F4F7F9" />
     <meta name="robots" content="noindex" />
+    {refresh}
     <title>{escape(en_h)} · {escape(ar_h)} — Prime Printing Co.</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600&amp;family=Montserrat:wght@400;500&amp;display=swap" />
-    <style>{_PAYMENT_PAGE_CSS}</style>
+    <link rel="stylesheet" href="{fonts_href}" media="print" onload="this.media='all'" />
+    <noscript><link rel="stylesheet" href="{fonts_href}" /></noscript>
+    <style>{_arabic_font_faces()}{_PAYMENT_PAGE_CSS}</style>
   </head>
-  <body class="state-{status}">
+  <body class="state-{status} tone-{_STATE_TONE[status]}">
     <a class="brand" href="https://primekw.net" aria-label="Prime Printing Co.">
       <img src="/assets/prime-logo-navy.png" alt="Prime Printing Co." width="720" height="315" />
     </a>
     <main class="slip">
       <section class="verdict">
-        <span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24">{_STATE_ICONS[status]}</svg></span>
+        <span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24">{_ICON_PATHS[_STATE_ICON[status]]}</svg></span>
         <div class="copy">
-          <div><h1>{escape(en_h)}</h1><p>{escape(en_p)}</p></div>
-          <div lang="ar" dir="rtl"><h1>{escape(ar_h)}</h1><p>{escape(ar_p)}</p></div>
+          <div lang="ar" dir="rtl"><h1>{escape(ar_h)}</h1><p><strong>{escape(ar_lead)}</strong> {escape(ar_rest)}</p></div>
+          <div dir="ltr"><h1>{escape(en_h)}</h1><p><strong>{escape(en_lead)}</strong> {escape(en_rest)}</p></div>
         </div>
       </section>
       {receipt}
@@ -924,6 +1103,36 @@ async def prime_logo() -> FileResponse:
     )
 
 
+@app.get("/assets/fonts/{filename}")
+async def brand_font(filename: str) -> Response:
+    """Self-hosted GE Dinar Two files; only the known names are served."""
+    stem, dot, ext = filename.rpartition(".")
+    if stem not in _ARABIC_BRAND_FONTS.values() or f".{ext}" not in _FONT_FORMATS:
+        return Response(status_code=404)
+    path = _FONT_DIR / filename
+    if not path.is_file():
+        return Response(status_code=404)
+    media = {"woff2": "font/woff2", "woff": "font/woff", "otf": "font/otf", "ttf": "font/ttf"}[ext]
+    return FileResponse(path, media_type=media, headers={"Cache-Control": "public, max-age=2592000"})
+
+
+def _recheck_urls(request: Request, track_id: str, session_id: str) -> tuple[str, str]:
+    """("Check again" URL, automatic re-check URL or "" once the limit is reached)."""
+    params = {}
+    if track_id:
+        params["track_id"] = track_id
+    if session_id:
+        params["session_id"] = session_id
+    try:
+        count = int(request.query_params.get("n") or 0)
+    except ValueError:
+        count = 0
+    check_url = f"/payment/success?{urlencode(params)}"
+    if count >= _RECHECK_LIMIT:
+        return check_url, ""
+    return check_url, f"/payment/success?{urlencode({**params, 'n': count + 1})}"
+
+
 @app.get("/payment/success")
 async def payment_success(request: Request) -> HTMLResponse:
     """Landing page after UPayments redirects the customer back.
@@ -946,11 +1155,13 @@ async def payment_success(request: Request) -> HTMLResponse:
             "payment_success_no_identifier",
             extra={"query": dict(request.query_params)},
         )
-        return _render_payment_page(status="unknown")
+        return _render_payment_page(status="unreadable")
 
     from upayments.client import upayments_client_from_env
     from upayments.exceptions import UPaymentsAPIError
 
+    check_url, recheck_url = _recheck_urls(request, track_id, session_id)
+    status_resp: dict = {}
     try:
         client = upayments_client_from_env()
         status_resp = client.get_charge_status(charge_id)
@@ -965,7 +1176,7 @@ async def payment_success(request: Request) -> HTMLResponse:
             return _render_payment_page(
                 status="success",
                 record=_payment_link_for(track_id, session_id, status_resp),
-                reference=charge_id,
+                reference=_payment_reference(status_resp, charge_id),
             )
 
         if (
@@ -986,22 +1197,25 @@ async def payment_success(request: Request) -> HTMLResponse:
             "payment_success_status_pending_or_unknown",
             extra={"track_id": charge_id, "result": result},
         )
-        return _render_payment_page(status="unknown")
     except UPaymentsAPIError as exc:
         _LOG.error(
             "payment_success_status_check_failed",
             extra={"track_id": charge_id, "error": str(exc)},
         )
-        return _render_payment_page(status="unknown")
     except Exception as exc:
         _LOG.error(
             "payment_success_unexpected_error",
             extra={"track_id": charge_id, "error": str(exc)},
         )
-        return _render_payment_page(status="unknown")
+    return _render_payment_page(
+        status="unknown",
+        record=_payment_link_for(track_id, session_id, status_resp),
+        check_url=check_url,
+        recheck_url=recheck_url,
+    )
 
 
-# ── Invoice PDF proxy ──────────────────────────────────────────────────────────
+# ── Branded /pay link ─────────────────────────────────────────────────────────
 
 @app.get("/pay/{link_id}")
 async def redirect_to_payment(link_id: str) -> Response:
@@ -1014,36 +1228,44 @@ async def redirect_to_payment(link_id: str) -> Response:
         page = _render_payment_page(status="inactive")
         page.status_code = 404
         return page
+    charge_id = record.get("tap_charge_id") or ""
     if record.get("status") == "PAYMENT_CAPTURED":
-        return _render_payment_page(status="success", record=record)
+        return _render_payment_page(
+            status="paid", record=record, reference=_payment_reference({}, charge_id)
+        )
 
-    attempt = _latest_attempt(record.get("tap_charge_id") or "")
+    attempt, status_resp = _latest_attempt(charge_id)
     if attempt == "paid":
         # Captured at the gateway, webhook not processed yet. Never regenerate
         # here: a fresh charge would let the customer pay twice.
-        return _render_payment_page(status="success", record=record)
+        return _render_payment_page(
+            status="paid", record=record, reference=_payment_reference(status_resp, charge_id)
+        )
     if attempt == "failed":
-        record = _replace_failed_charge(record) or record
+        fresh = _replace_failed_charge(record)
+        if fresh is None:
+            # Never send the customer back to the dead charge on the gateway.
+            return _render_payment_page(status="retry_error", record=record)
+        record = fresh
     return RedirectResponse(record["payment_url"], status_code=302)
 
 
-def _latest_attempt(charge_id: str) -> Literal["paid", "failed", "open"]:
+def _latest_attempt(charge_id: str) -> tuple[Literal["paid", "failed", "open"], dict]:
     """Outcome of the stored charge's latest attempt; "open" when unknown or unattempted."""
     if not charge_id:
-        return "open"
+        return "open", {}
     try:
         from upayments.client import upayments_client_from_env
 
-        result = _payment_result_from_status_payload(
-            upayments_client_from_env().get_charge_status(charge_id)
-        ).upper()
+        status_resp = upayments_client_from_env().get_charge_status(charge_id)
+        result = _payment_result_from_status_payload(status_resp).upper()
     except Exception:
-        return "open"
+        return "open", {}
     if result in _PAID_REDIRECT_RESULTS:
-        return "paid"
+        return "paid", status_resp
     if result in _FAILED_REDIRECT_RESULTS or "NOT CAPTURED" in result:
-        return "failed"
-    return "open"
+        return "failed", status_resp
+    return "open", status_resp
 
 
 def _replace_failed_charge(record: dict) -> dict | None:
@@ -1068,10 +1290,22 @@ def _replace_failed_charge(record: dict) -> dict | None:
     charge_id = str(charge.get("charge_id") or "")
     if not payment_url or not charge_id:
         return None
-    db.replace_charge(record["id"], tap_charge_id=charge_id, payment_url=payment_url)
-    _LOG.info("pay_retry_charge_created", extra={"link_id": record.get("id"), "charge_id": charge_id})
+    swapped = db.replace_charge(
+        record["id"],
+        tap_charge_id=charge_id,
+        payment_url=payment_url,
+        expected_charge_id=str(record.get("tap_charge_id") or ""),
+    )
+    if swapped:
+        _LOG.info("pay_retry_charge_created", extra={"link_id": record.get("id"), "charge_id": charge_id})
+    else:
+        # A simultaneous retry already replaced the charge; use that one so
+        # both taps land on the same checkout. Ours is left unused.
+        _LOG.info("pay_retry_charge_superseded", extra={"link_id": record.get("id"), "charge_id": charge_id})
     return db.get_by_id(record["id"])
 
+
+# ── Invoice PDF proxy ──────────────────────────────────────────────────────────
 
 @app.get("/invoice/{invoice_id}/pdf")
 async def get_invoice_pdf(invoice_id: str) -> Response:
